@@ -41,20 +41,21 @@ Wine bundle** shipped inside the `.app`.
 ```mermaid
 flowchart TD
     A[Identify source] --> B{Engine?}
-    B -->|Godot| C{PCK encrypted?}
-    B -->|Unity / GameMaker| E
-    B -->|Loose Godot project| D
 
-    C -->|No| D[Native route]
+    B -->|Godot| C{PCK encrypted?}
+    B -->|Loose Godot project| D
+    B -->|Unity / GameMaker| E{Official macOS build<br/>on Steam / GOG?}
+
+    C -->|No| D[Native route:<br/>pair assets with macOS Godot]
     C -->|Yes| E
-    D --> F[Bundle native .app]
-    E --> E1{Native macOS build<br/>on Steam/GOG?}
-    E1 -->|Yes| E2[Use it - stop here]
-    E1 -->|No| G[Wine route]
-    G --> H[Bundle Wine + graphics backend]
-    H --> F
-    F --> I[Install + codesign]
-    I --> J[3-way test]
+
+    E -->|Yes| E2[Use the official build.<br/>Stop here.]
+    E -->|No| G[Wine route:<br/>bundle Wine + graphics backend]
+
+    D --> F[Bundle .app]
+    G --> F
+    F --> I[Install to /Applications + codesign]
+    I --> J[3-way test:<br/>headless, live, render]
 ```
 
 ### Route A — native Godot (always preferred)
@@ -135,9 +136,10 @@ GitHub release downloads often stall behind a proxy. Use the
 
 ## Install
 
-`game-to-mac` is two files: `SKILL.md` (the playbook) and this `README.md`. Any agent
-that loads skills from a directory will understand it — there is no vendor-specific
-format beyond the YAML frontmatter at the top of `SKILL.md`.
+`game-to-mac` is a directory with no build step: `SKILL.md` (the playbook), this
+`README.md`, and a `.gitignore`. Any agent that loads skills from a directory will
+understand it — there is no vendor-specific format beyond the YAML frontmatter at the
+top of `SKILL.md`.
 
 ```bash
 # Claude Code
