@@ -1,124 +1,283 @@
 # game-to-mac
 
-Port a non-macOS game (Android APK, Godot project, or loose assets) into a runnable macOS `.app` bundle installed in `/Applications`.
+Port a non-macOS game — Android APK, Windows Godot/Unity/GameMaker build, or a loose
+project folder — into a runnable macOS `.app` installed in `/Applications`.
 
-`game-to-mac` is a [WorkBuddy](https://www.workbuddy.ai) skill. It encodes an end-to-end workflow for turning Godot Engine 4.x Android builds (and related formats) into first-class macOS apps — handling binary project extraction, GDExtension/platform-library stubbing, `.godot` cache preservation, `.app` packaging, ad-hoc code signing, and mandatory pre-delivery testing.
+This is a **skill**, not an application. It is a single `SKILL.md` playbook that an AI
+coding agent reads and executes. There is nothing to compile and no runtime dependency
+beyond the tools listed under [Requirements](#requirements).
 
-> Default assumption: the source is an **Android APK built with Godot Engine 4.x**. The workflow also adapts to other Godot export formats, loose project folders, Windows Godot executables (Wine wrapper), and Windows Unity IL2CPP standalones.
+Default assumption: the source is an **Android APK built with Godot Engine 4.x**. The
+playbook detects other formats and routes them accordingly.
 
 ---
 
-## Table of contents
+## Contents
 
-- [What it does](#what-it-does)
-- [Supported sources](#supported-sources)
-- [Installing the skill](#installing-the-skill)
+- [How it works](#how-it-works)
+- [Requirements](#requirements)
+- [Install](#install)
 - [Usage](#usage)
-- [Workflow overview](#workflow-overview)
-- [Known pitfalls & fixes](#known-pitfalls--fixes)
+- [Support matrix](#support-matrix)
+- [Caveats](#caveats)
 - [License](#license)
 
 ---
 
-## What it does
+## How it works
 
-`game-to-mac` automates the fiddly parts of porting a game to macOS:
+The core insight: **game assets are usually platform-independent; only the engine binary
+is platform-specific.** A Godot `.pck` (or the `assets/` tree inside an APK) is just
+packed resource data — the same bytes run on Windows, Linux, Android, or macOS. So the
+port is mostly a matter of **pairing the assets with a macOS engine binary of a matching
+version**, then cleaning up the platform-specific bits that no longer apply.
 
-- **Inspects** an APK to identify the Godot engine version and bundled plugins.
-- **Extracts** assets and converts a binary `project.binary` into a text `project.godot`.
-- **Fixes project settings** (main scene, autoloads, audio bus, icon) for the macOS runtime.
-- **Stubs or disables** Android-only GDExtensions (e.g. GodotSteam) so the missing `.dylib` files don't crash the launch.
-- **Preserves** the hidden `.godot/` cache (compiled scenes, UID cache, script class registry) — the #1 cause of broken ports.
-- **Packages** a proper `.app` bundle with launcher, `Info.plist`, and generated `.icns` icon.
-- **Installs** to `/Applications` and **ad-hoc signs** the bundle.
-- **Tests** three ways (headless parse, live launch, render) before declaring success.
-- **Falls back** to a self-contained Wine-wrapped `.app` for Windows Godot executables (encrypted `.pck`) and Windows Unity IL2CPP standalones.
+When no macOS engine exists to host the assets (closed-source Unity / GameMaker players),
+the playbook falls back to **running the original Windows `.exe` through a self-contained
+Wine bundle** shipped inside the `.app`.
+
+### Route selection
+
+```mermaid
+flowchart TD
+    A[Identify source] --> B{Engine?}
+    B -->|Godot| C{PCK encrypted?}
+    B -->|Unity / GameMaker| E
+    B -->|Loose Godot project| D
+
+    C -->|No| D[Native route]
+    C -->|Yes| E
+    D --> F[Bundle native .app]
+    E --> E1{Native macOS build<br/>on Steam/GOG?}
+    E1 -->|Yes| E2[Use it - stop here]
+    E1 -->|No| G[Wine route]
+    G --> H[Bundle Wine + graphics backend]
+    H --> F
+    F --> I[Install + codesign]
+    I --> J[3-way test]
+```
+
+### Route A — native Godot (always preferred)
+
+1. **Inspect** — `unzip -l game.apk`; read engine version from `assets/_cl_`; note
+   plugins under `assets/addons/`.
+2. **Extract** — pull out the `assets/*` tree and flatten it.
+3. **Convert settings** — Android/Windows exports ship a binary `project.binary`. Run a
+   three-line `dump_settings.gd` under a desktop Godot binary to emit a text
+   `project.godot` you can actually edit.
+4. **Fix project settings** — resolve `run/main_scene` (usually a `uid://` reference that
+   must be resolved to a real `.tscn`), prune dead autoloads, set icon and audio bus.
+5. **Neutralize platform-only extensions** — an Android export ships only `.so` files and
+   a Windows export only `.dll` files. The macOS `.dylib` is simply absent, so the
+   extension must be stubbed or disabled or the launch dies.
+6. **Preserve the `.godot/` cache** — this is the single biggest cause of broken ports.
+   It holds compiled `.scn` files, the UID cache, and the `class_name` registry. Opening
+   the project in the desktop editor can silently wipe it.
+7. **Bundle** — `Info.plist`, launcher script, generated `.icns`.
+8. **Install and sign** — copy to `/Applications`, then ad-hoc `codesign` the whole bundle.
+9. **Test three ways** — headless parse, live-alive check, and a render check that proves
+   real pixels were drawn. All three must pass before you call it done.
+
+### Route B — Wine wrapper (when there is no macOS engine)
+
+1. **Check Steam/GOG for a native macOS build first.** Many "Windows-only" indie games
+   have one. This beats every workaround below.
+2. **Bundle a gcenx Wine build** inside `Contents/Resources/wine`. Do not depend on the
+   user installing Whisky / CrossOver / Homebrew Wine — those sources break behind
+   proxies and dead CDNs.
+3. **Create a prefix** with `wineboot -u` (plain `wine cmd` will not create `drive_c`).
+4. **Install the right graphics backend.** This is where nearly all the effort goes, and
+   the correct choice depends on the engine — see the [support matrix](#support-matrix).
+5. **Handle the repack layer.** GoldBerg / TENOKE are offline and fine. OnlineFix will
+   silently kill the game unless you force Wine's builtin `winmm` and supply an offline
+   Steam API emulator.
+
+### Why the testing step is non-negotiable
+
+A port can "launch" and still draw a black screen, or exit after 60 seconds because a
+Steam emulator gave up. The playbook therefore requires objective evidence:
+`Player.log` exists, the process is still alive after N seconds, and pixel statistics
+prove non-black frames. **Never claim a render fix from eyeballing a screenshot** —
+build a numeric gate instead.
 
 ---
 
-## Supported sources
+## Requirements
 
-| Source type | Native Mac app? | Notes |
-| --- | --- | --- |
-| Android APK (Godot 4.x) | ✅ Yes | Primary path. Converts `project.binary` → `project.godot`. |
-| Godot HTML5/WASM in APK | ✅ Yes | `.pck` is platform-independent; pair with a native Godot binary of the same version. |
-| Loose Godot project folder | ✅ Yes | Skip APK extraction steps. |
-| Windows Godot `.exe` + encrypted `.pck` | ⚠️ Wine wrapper | PCK AES key lives in the Windows binary, not the file. Wine-side CJK font fix avoids needing the key. |
-| Windows Unity IL2CPP standalone | ⚠️ Wine wrapper | No native rebuild without the Unity project. Force D3D11; bundle MoltenVK Wine build. |
+Verified on **macOS with Apple Silicon (M1 Pro)**. Intel Macs should work but are not
+the tested reference.
+
+### Native Godot route
+
+| Need | Notes |
+| --- | --- |
+| Godot binary | `/Applications/Godot.app`, or download a version-matched build. **Must match the game's `major.minor`** (patch may differ) or the engine refuses the PCK. |
+| `unzip`, `bsdtar` | `bsdtar` handles RAR (including multi-part) with no extra tooling. |
+| `codesign`, `xattr` | Xcode Command Line Tools. |
+| Python + Pillow | For icon generation and pixel-statistics testing. `iconutil` is unreliable. |
+
+### Wine route
+
+| Need | Notes |
+| --- | --- |
+| Rosetta 2 | Apple Silicon runs the x86_64 Wine build under translation. |
+| gcenx Wine build | ~849 MB per bundle. Reuse an existing one with `cp -Rc` (APFS clone, instant, copy-on-write). |
+| MoltenVK | Ships with the gcenx build. This is the only Vulkan path — there is no vkd3d. |
+| Disk space | Budget ~1 GB per ported game. |
+
+### Network
+
+GitHub release downloads often stall behind a proxy. Use the
+`https://ghfast.top/https://github.com/...` mirror — it pulled a 161 MB Godot zip in
+~20s where the direct URL hung after ~400 KB.
 
 ---
 
-## Installing the skill
+## Install
 
-This skill runs inside WorkBuddy. Copy or clone it into your skills directory.
-
-**User-level** (available across all projects):
+`game-to-mac` is two files: `SKILL.md` (the playbook) and this `README.md`. Any agent
+that loads skills from a directory will understand it — there is no vendor-specific
+format beyond the YAML frontmatter at the top of `SKILL.md`.
 
 ```bash
+# Claude Code
+cp -R game-to-mac ~/.claude/skills/game-to-mac
+
+# Codex
+cp -R game-to-mac ~/.codex/skills/game-to-mac
+
+# WorkBuddy
 cp -R game-to-mac ~/.workbuddy/skills/game-to-mac
 ```
 
-**Project-level** (shared with a team on one project):
+Or clone it straight into place:
 
 ```bash
-cp -R game-to-mac /path/to/project/.workbuddy/skills/game-to-mac
+git clone https://github.com/skawaks/game-to-mac.git ~/.workbuddy/skills/game-to-mac
 ```
-
-Alternatively, point WorkBuddy at this repo when importing a skill.
-
-> Requires a desktop **Godot** editor installed at `/Applications/Godot.app` for conversion and testing. Wine-based ports bundle their own Wine build inside the app, so no system Wine is needed.
 
 ---
 
 ## Usage
 
-Invoke the skill naturally in a WorkBuddy conversation:
+Just describe the goal and give a path:
 
 - "Port this game to mac"
 - "Make this APK run on mac"
 - "Convert this APK to a mac app"
-- "Install it in /Applications"
 - "移植到 mac"
 
-Provide the path to the source file (e.g. `game.apk`), and the skill drives the rest — extracting, converting, packaging, signing, and verifying.
+Then hand over the source file. The agent drives the rest — detection, extraction,
+packaging, signing, verification.
 
 ---
 
-## Workflow overview
+## Support matrix
 
-1. **Inspect the source** — `unzip -l game.apk`, read `assets/_cl_` for engine version, list plugins.
-2. **Extract assets** — `unzip` the `assets/*` tree and flatten.
-3. **Convert `project.binary` → `project.godot`** — run a tiny `dump_settings.gd` SceneTree script under the desktop Godot editor.
-4. **Fix project settings** — main scene, autoloads, audio bus, icon path.
-5. **Handle GDExtensions** — prefer a GDScript stub, else disable the `.gdextension`.
-6. **Decode `.gdc`** (if needed) — XOR-based identifier decoder for API-surface discovery.
-7. **Preserve `.godot/` cache** — copy with `cp -R "src/." "dst/"` so dotfiles survive; restore from APK if the editor wiped them.
-8. **Build the `.app`** — `Info.plist`, launcher script, generated `.icns`.
-9. **Install to `/Applications`** and **ad-hoc sign** the whole bundle.
-10. **Test** — headless parse, live launch, and render checks must all pass.
-11. **Wine fallback** (Windows sources) — bundle a gcenx macOS Wine build, set up the prefix, fix CJK tofu, force the right renderer.
-12. **Deliver** — launch once more, ship a `.app` zip backup, note non-fatal warnings.
+### Tested working
 
-See `SKILL.md` for the full command-level playbook.
+| Source | Route | Verified on | Result |
+| --- | --- | --- | --- |
+| Android APK, Godot 4.x | Native | Godot 4.x / Apple Silicon | ✅ Full native `.app` |
+| Godot HTML5/WASM in APK | Native | `index.pck` + matching Godot binary | ✅ Full native `.app` |
+| Loose Godot project folder | Native | — | ✅ Full native `.app` |
+| Windows Godot, **unencrypted** PCK | Native | Smashing Bottles (Godot 4.6.2, M1 Pro, Metal 4.0 Forward+) | ✅ Full native `.app`, better than Wine |
+| Windows Godot, **encrypted** PCK | Wine | `gamblers-table` (Godot 4, SteamRIP) | ⚠️ Runs via Wine; CJK needs the font fix |
+| GameMaker Studio 2 (`data.win`) | Wine + **DXVK-macOS async 1.10.3** | How Many Dudes (M1 Pro) | ✅ Only working config — see [caveats](#caveats) |
+| Unity 6 (6000.4.x) Mono | Wine + DXVK-macOS 1.10.3, `-force-d3d11` | How to Fish (6000.4.4f1) | ✅ No GL shim needed |
+| Unity 2022.3 Mono | Wine + DYLD OpenGL shim | Demon Lord: Just a Block | ✅ wined3d reports D3D 11.0 level 10.1 |
+
+### Partially working
+
+| Source | Status |
+| --- | --- |
+| Unity IL2CPP, TENOKE repack | Engine initializes, `Player.log` written, repack init OK. Rendering not confirmed headless — `d3d11: failed to create device (80004005)` is usually just "no display in sandbox". Must be confirmed on a real Mac. |
+
+### Currently unsolvable
+
+Know these before you burn hours on them.
+
+| Case | Why it's stuck |
+| --- | --- |
+| **Encrypted Godot PCK, key unavailable** | The 32-byte AES key lives in the engine binary, never in the `.pck`. No key, no decrypt, no native rebuild. Wine is the only route. |
+| **Unity IL2CPP, D3D11, Apple Silicon** | Every D3D11 path fails: wined3d returns a silent `80004005`; DXVK ≥3.0 needs `geometryShader` (MoltenVK lacks it); DXVK 1.10.3 lacks D3D FL11_0; `-force-vulkan` / `-force-glcore` report "not built from editor" because the player ships D3D11 only. **Check Steam/GOG for a native macOS build before trying anything.** |
+| **GameMaker via wined3d or D3DMetal** | wined3d gives 100% black screen + audio (7 registry combos tried, all failed). D3DMetal crashes on `CheckMultisampleQualityLevels` `0x80070057`. Only DXVK-macOS async 1.10.3 works. |
+| **D3D12** | The bundled gcenx Wine has no vkd3d-proton, so D3D12 is unusable. Unity 6 additionally enforces D3D12 Feature Level 12.1. |
+| **Stock DXVK 2.x / 3.x on Apple GPUs** | Hard-requires Vulkan 1.3 + geometry/tessellation shaders. MoltenVK exposes neither. Device init aborts. |
+| **Online co-op / achievements under Wine** | Needs a reachable Steam client, which a macOS Wine prefix cannot provide. Single-player is fine; multiplayer is not. |
+| **Native rebuild of Unity / GameMaker** | Impossible without the original project. There is no open engine to host those assets on macOS — unlike Godot. |
 
 ---
 
-## Known pitfalls & fixes
+## Caveats
 
-A running log of hard-won lessons (append-only). Each entry: what broke, what fixed it, date.
+Condensed rules. `SKILL.md` §14 keeps the full dated, evidence-backed log — read it
+before attempting an unfamiliar engine.
 
-- **2026-08-28 — Wine CJK "hex tofu" on Godot 4 Windows build:** Game bundles only Latin fonts; relies on DirectWrite `IDWriteFactory2::GetSystemFontFallback`. Under Wine the fallback target names (`Microsoft YaHei`, `SimSun`, `PMingLiU`, `Yu Gothic`, etc.) are unmapped → CJK renders as codepoint boxes. Fix: copy one CJK `.ttf` (`Arial Unicode.ttf` from `/System/Library/Fonts/Supplemental/`) into `drive_c/windows/Fonts/`, then add `HKCU\Software\Wine\Fonts\Replacements` mapping every Windows CJK family name → `Arial Unicode MS`. Set `LANG`/`LC_ALL=zh_CN.UTF-8`. Verify with `WINEDEBUG=+dwrite`: look for `dwritefactory2_GetSystemFontFallback`, `fontfallback_MapCharacters("<game font>")`, `fontcollection_add_replacement`. Make the fix idempotent in `launch.sh` (copy font + `wine regedit /s` the .reg) so a rebuilt prefix does not lose it.
-- **2026-08-28 — Whisky / CrossOver / Homebrew Wine are unreliable:** their installers hit dead CDNs or corporate proxies. Bundle a gcenx `macOS_Wine_builds` tarball (e.g. `wine-stable-11.0_1-osx64.tar.xz`) inside `Contents/Resources/wine`.
-- **2026-08-28 — Apple Silicon Wine needs Rosetta + Vulkan path:** use an x86_64 Wine build; set `DYLD_FALLBACK_LIBRARY_PATH` to `Contents/Resources/wine/lib` so `libMoltenVK.dylib` is found (Vulkan/MoltenVK must init or Godot 4 won't render).
-- **2026-08-28 — Encrypted Godot PCK: key is in the engine binary, not the `.pck`.** Source (`pck_packer.cpp`) shows the 32-byte AES key is passed into the packer, never written into the file. Don't waste time brute-forcing the `.pck` header; if you need to decrypt, recover the key from the `.exe` (raw bytes / 64-hex string / gzip'd `project.binary`). For CJK, the Wine-side font fix above avoids needing the key at all.
-- **2026-08-28 — Proxy network quirks:** `git clone` may 502 while `curl` works; prefer release tarballs. GitHub releases throttle to ~30 KB/s behind proxy — use the `https://ghfast.top/https://github.com/...` mirror for fast source fetches.
-- **2026-08-28 — Copied Godot binary SIGKILLs on launch (exit 137, no output):** `cp` of a signed Godot binary (e.g. `/Applications/Godot.app/.../Godot`) into a bundle breaks its code signature; macOS AMFI kills it with SIGKILL before any banner prints. Symptom: `--version` returns empty, exit 137. Fix: after placing the binary, run `codesign --force --deep --sign - "App.app"` and verify with `codesign -v`. Always sign the bundle, not just the inner binary.
-- **2026-08-28 — Source type "Godot HTML5/WASM export wrapped in Android APK":** APK has `assets/.../index.html`, `index.js`, `index.wasm`, `index.pck` (NOT `project.binary`). This is a Godot web export shelled in an Android WebView. The `.pck` is platform-independent — extract `index.pck`, rename to `<exe>.pck` next to a NATIVE Godot binary of the SAME major.minor (read `GDPC`+uint32 major@offset8/minor@12/patch@16 from the PCK header), and it runs as a real Mac game. No `project.godot` conversion needed.
-- **2026-08-28 — Windows Unity (IL2CPP) port ≠ Godot; no native rebuild:** a Windows Unity player (`GameAssembly.dll` + `UnityPlayer.dll` + `<Game>_Data`) cannot be recompiled into a native Mac `.app` without the original Unity project. Port via the Wine wrapper (section 11). Identify engine from `globalgamemanagers` / UnitySubsystems; offline GoldBerg repacks (`steam_settings/` + `steam_api64.dll`) need no Steam login. Renderer reality on the bundled gcenx wine-11.0: it ships `libMoltenVK.dylib` (Vulkan→Metal works — M1 Pro detected) but **NO vkd3d-proton**, so D3D12 is unusable; force D3D11 (`-force-d3d11`) as the default. Tested on `Sludgineers` (Unity 6000.4.12f1): D3D11 device creation fails *headlessly* (no display in sandbox — may work on a real Mac), Vulkan is rejected with "Vulkan was not built from editor" (that player has no Vulkan renderer compiled in), and the game enforces a **D3D12 Feature Level 12.1 minimum** ("D3D12 API denied by user filter" for FL<12.1). Net: if D3D11 doesn't render on the user's Mac, the reliable fix is a D3D12-capable Wine (CrossOver, or bundle vkd3d-proton) — the gcenx build alone cannot do D3D12. Expect a harmless missing `dev/*` autoload (dev/telemetry probe) and a "missing Steamworks" line if the game has an optional Steam plugin — both are non-fatal.
-- **2026-08-28 — `--quit-after` is the only reliable timeout on macOS:** `timeout` is not installed by default. Use `godot --headless --quit-after <sec>` for self-termination; running without it blocks. Heavy engine + PCK also gets SIGKILL'd (137) inside the tool sandbox — re-run verification with the sandbox disabled (real machine memory).
+**Assets**
+- Copy dotfiles explicitly: `cp -R "src/." "dst/"`. Shell globs skip `.godot/` and that
+  kills the port.
+- Never let the desktop editor touch the project before you have a pristine copy of
+  `.godot/` from the original archive.
+
+**Signing**
+- Always `codesign --force --deep --sign -` as the **last** step, after every edit.
+- A copied Godot binary SIGKILLs with exit 137 and no output if left unsigned —
+  AMFI kills it before any banner prints.
+- **Do not** ad-hoc sign Wine bundles. The Steam emulator writes inside the bundle at
+  runtime and breaks the seal, so Gatekeeper reports the app as damaged. Use
+  `xattr -dr com.apple.quarantine` and have the user approve once via
+  System Settings → Privacy & Security → Open Anyway.
+
+**Extensions and autoloads**
+- Disabling a `.gdextension` takes three steps, not one: rename the file, remove the
+  `[editor_plugins]` line that force-enables it, and delete the stale
+  `.godot/**/extension_list.cfg` entry.
+- Delete dead autoloads. Dev-only tooling (e.g. MCP addons) is listed as autoloads but
+  its `.gd` files are not exported, which yields "Failed to instantiate autoload".
+- OnlineFix repacks: force `WINEDLLOVERRIDES="winmm=b"` so the proxy never loads, and
+  replace the real `steam_api64.dll` with an offline emulator (GoldBerg). Skip either and
+  the game dies after 30–60s with no `Player.log` at all.
+
+**Graphics backends on Apple Silicon**
+- GameMaker → DXVK-macOS async 1.10.3 only. Copy just `d3d11.dll` + `d3d10core.dll`,
+  keep Wine's builtin `dxgi`, set `WINEDLLOVERRIDES="d3d11=n,b"` (not `d3d11,dxgi=n,b`),
+  and `DXVK_ASYNC=1`.
+- Unity 6 Mono → DXVK 1.10.3, `-force-d3d11`. No GL shim.
+- Unity 2022.3 Mono → wined3d plus a `DYLD_INSERT_LIBRARIES` shim that fakes
+  `GL_EXT_shader_integer_mix` and `GL_ARB_polygon_offset_clamp`.
+- Verify the downloaded DXVK tarball with `tar -tzf`. Behind a proxy the direct GitHub
+  URL can silently return a truncated ~2.7 MB file.
+
+**Verification**
+- `--quit-after <sec>` is the only reliable timeout on macOS — `timeout` is not installed.
+  A heavy engine can also be SIGKILLed (137) inside a tool sandbox; re-run with the
+  sandbox disabled.
+- `Player.log` is the fastest go/no-go for Unity:
+  `<prefix>/drive_c/users/<user>/AppData/LocalLow/<Company>/<Product>/Player.log`.
+  No log after 60s means the game died before or inside engine init.
+- Launch test apps with `open -a "/Applications/X.app"`, never `nohup ... &` —
+  LaunchServices detaches the process so it survives between tool calls.
+- Judge rendering numerically (`dark_fraction`, `distinct_color_buckets`), not visually.
+  A bright error dialog also scores as "rendering", so always cross-check window size
+  and log contents.
+
+**Misc**
+- Wine prefix init needs `wineboot -u`; `wine cmd` will not create `drive_c`.
+- Use `bsdtar` for RAR — there is no `unrar`.
+- `iconutil` chokes on some PNGs. Generate `.icns` with Pillow instead.
+- Reuse a Wine bundle via `cp -Rc` (APFS clone) — instant, and the copy is independent.
+- Set `LANG`/`LC_ALL` and add Wine font replacements for CJK in **Godot** Windows builds.
+  GameMaker and Unity games ship their own fonts and need none of this.
 
 ---
+
+## Contributing
+
+The pitfalls log in `SKILL.md` §14 is append-only and is the most valuable part of this
+repo. If a port fails in a new way, or you find a fix, add a dated entry with what
+broke, what fixed it, and how you verified it. Pull requests welcome.
 
 ## License
 
-MIT — use it, fork it, improve it. Pull requests that extend the pitfalls log are welcome.
+MIT.

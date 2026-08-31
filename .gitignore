@@ -1,0 +1,50 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Porting workspaces & scratch
+work/
+workspace/
+build/
+dist/
+.scratch/
+tmp/
+temp/
+
+# Game artifacts (large, never commit)
+*.app/
+*.pck
+*.apk
+*.exe
+*.dll
+*.so
+*.dylib
+*.icns
+*.iconset/
+
+# Archives & downloads
+*.zip
+*.rar
+*.7z
+*.tar
+*.tar.gz
+*.tar.xz
+
+# Bundled runtimes copied in during a port
+wine/
+dxvk/
+prefix/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# Logs
+*.log

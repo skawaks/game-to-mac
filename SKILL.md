@@ -288,6 +288,91 @@ Fix it in the Wine prefix:
 - `git clone` through a proxy may return 502 while `curl` works; prefer release tarballs.
 - GitHub releases may be throttled to ~30 KB/s behind a proxy. Use the `ghfast.top` mirror: `https://ghfast.top/https://github.com/...`.
 
+## 11b. Windows Unity (IL2CPP) port — specific workflow
+
+When the source is a **Windows Unity standalone** (not Godot), apply the Wine wrapper from
+§11 but note these differences:
+
+- **No native rebuild.** Without the Unity project you cannot produce a real Mac `.app`;
+  the deliverable is a Wine-launched `.app` that runs the Windows `.exe`.
+- **Detect the engine:** read `Unity <ver>` from `globalgamemanagers`; list compiled
+  renderers by testing `-force-d3d11` / `-force-d3d12` / `-force-vulkan` and reading the
+  `Player.log` (under `drive_c/users/<user>/AppData/LocalLow/<Company>/<Game>/`).
+  "Vulkan was not built from editor" ⇒ that player has no Vulkan renderer.
+- **Default renderer = D3D11.** The gcenx wine-11.0 build has MoltenVK but no vkd3d, so
+  D3D12 is dead. Launch with `-force-d3d11`. Allow `RENDERER=d3d12|vulkan|auto` override.
+- **Watch for engine-side gates.** Some Unity 6 games reject D3D12 below Feature Level
+  12.1 ("D3D12 API denied by user filter"). That only matters if you attempt D3D12 (needs
+  vkd3d). With `-force-d3d11` it is irrelevant.
+- **GoldBerg / Steam-emu repacks:** `steam_settings/` + `steam_api64.dll` ⇒ fully offline,
+  no Steam needed. Just run the `.exe`.
+- **OnlineFix repacks:** `winmm.dll` + `OnlineFix64.dll` + `OnlineFix.ini` + `dlllist.txt`, and NO
+  `steam_settings/`. OnlineFix needs a *reachable Steam client*, which a Wine prefix on macOS cannot
+  provide, and it kills the game when it can't find one. **Always force `winmm=b`** (Wine's builtin)
+  so the proxy never loads. See pitfall 2026-08-30.
+- **Headless smoke test limitation:** in a display-less sandbox, `d3d11: failed to create
+  device (80004005)` is usually environmental (no surface), not fatal. Real rendering must
+  be confirmed by the user launching the `.app` on a Mac with a display.
+
+## 11c. Windows Godot (UNencrypted PCK) → native macOS (preferred over Wine)
+
+When the source is a **Windows Godot `.exe` + `.pck`** whose PCK header `flags` does NOT have the
+per-file encryption bit (GodotSteam / TENOKE / SteamRIP repacks are often unencrypted), build a REAL
+native macOS `.app` — no Wine. Verified working: Godot 4.6.2 + Apple M1 Pro (Metal 4.0 Forward+).
+Smashing Bottles (SteamRIP/TENOKE, Godot 4.6.2) was ported this way end-to-end.
+
+### Detect (decide native vs Wine)
+- PCK header: magic `GDPC`, then `pack_format(u32)=3`, `major/minor/patch(u32)`, `flags(u32)`,
+  `files_base(u64)`, `dir_offset(u64)`, `reserved(u32)` = 44-byte header. Per-file encryption bit =
+  each entry's `flags(u32) & 1`. If **no file** has it (and the global `flags` did not trigger an
+  encrypted directory), the PCK is plaintext → native is viable.
+- Note `major.minor.patch`. You MUST run it with a Godot binary of the SAME `major.minor` (patch may
+  differ). A different minor → engine refuses to load the PCK.
+- If a GodotSteam `.gdextension` is present (`strings game.pck | grep godotsteam`), plan to disable it
+  (Windows exports ship only the `.dll`, never the macOS `.dylib`).
+
+### Build steps (native)
+1. **Get the matching Godot macOS binary.** e.g.
+   `Godot_v{maj}.{min}.{patch}-stable_macos.universal.zip` from github releases. curl/github throttle
+   behind proxy → use the `ghfast.top` mirror:
+   `curl -sL -o g.zip "https://ghfast.top/https://github.com/godotengine/godot/releases/download/{tag}/Godot_v..._macos.universal.zip"`.
+2. **Extract the PCK** with a custom parser (directory is plaintext at `dir_offset`; see pitfall
+   2026-08-29). Header 44B; directory = `file_count(u32)` then per entry
+   `[path_len(u32, 4-aligned, NO null terminator)][path][offset(u64)][size(u64)][md5(16)][flags(u32)]`;
+   absolute file offset = `files_base + offset`. Some paths are stored WITHOUT the `res://` prefix
+   (e.g. `.godot/...`) — strip the prefix only if present. Preserve dotfiles when copying:
+   `cp -R "src/." "dst/"`.
+3. **Convert `project.binary` → `project.godot`** (Windows exports often ship `project.binary`, not
+   `project.godot`). Run the matching 4.x editor headless with `dump_settings.gd`:
+   `extends SceneTree; func _init(): ProjectSettings.save_custom("res://project.godot"); quit()`
+   launched as `godot --headless --path <game_assets> --script dump_settings.gd`.
+4. **Resolve main scene**: `run/main_scene` is usually a `uid://...`. Resolve with a tiny Godot script
+   using `ResourceUID.text_to_id()` + `ResourceUID.get_id_path()` (Godot stores UIDs as int64 in
+   `uid_cache.bin`, not as text — do NOT grep the uid string). Set
+   `run/main_scene="res://<Scene>.tscn"`; Godot auto-follows `<Scene>.tscn.remap` → compiled
+   `<hash>-<Scene>.scn` in `.godot/exported/<hash>/`.
+5. **Disable the GodotSteam GDExtension** (no macOS `.dylib` in a Windows export):
+   - rename `addons/godotsteam/godotsteam.gdextension` → `.bak`;
+   - remove the `[editor_plugins] enabled=PackedStringArray("res://addons/godotsteam/plugin.cfg")`
+     line (it force-loads the GDExtension even when the file is gone);
+   - delete any `.godot/**/extension_list.cfg` that references the missing `.gdextension`.
+6. **Steam stub (optional insurance)**: if any script references the `Steam` singleton, add a GDScript
+   autoload `Steam="*res://addons/godotsteam/steam_stub.gd"` with no-op methods + the common signals
+   (`steam_callback`, `leaderboard_*`, `global_stats_received`, etc.). In Smashing Bottles NO script
+   referenced `Steam` (grep 0 hits in `.gdc`/`.gd`), so the stub was pure insurance.
+7. **Remove dead autoloads**: editor-only dev tooling (e.g. `godot_mcp` Model-Context-Protocol addons)
+   is referenced as autoloads but NOT exported → their `.gd` files are missing → "Failed to instantiate
+   autoload" errors. Delete those `[autoload]` lines.
+8. Bundle + sign per §8/§9. Use the full editor binary renamed as the engine — it runs the game fine.
+   (A leaner export-template binary is smaller but the editor binary is simplest and works.)
+
+### Verify
+- Headless parse: `godot --headless --path game_assets --quit-after 120` → expect no `SCRIPT ERROR`,
+  no `GDExtension`/`godotsteam` lines, no "Could not find main scene".
+- Live launch: runs and prints `Metal ... Using Device #0: Apple - Apple M1 Pro` and stays ALIVE
+  (proves the renderer initialized on Apple Silicon). A harmless `rp_font is null` font-pin warning
+  from `Localization.gd` is non-fatal.
+
 ## 12. Deliver
 
 - Launch the installed app from Launchpad or Finder to confirm one more time.
@@ -306,7 +391,40 @@ file so it self-improves. Do not treat the skill as frozen.
   entry: one line, what happened, what fixed it, date.
 - If a section is wrong or outdated, correct it in place; do not leave stale advice.
 - Prefer specifics over vague tips (exact file paths, registry keys, command lines).
+- If a port succeeded or failed on an engine/config combination that is not yet in the
+  README support matrix, update `README.md` too — add it to "Tested working",
+  "Partially working", or "Currently unsolvable", and fold any broadly useful lesson
+  into the README "Caveats" section (condensed; detail stays here in §14).
 - This rule survives sessions: every future game-to-mac run re-applies it.
+
+### 13b. Auto-commit and push to GitHub (standing rule)
+
+This skill directory **is** a git repository tracking
+`https://github.com/skawaks/game-to-mac` (branch `main`). After finishing the
+iteration above, sync it — do not leave improvements stranded on one machine:
+
+```bash
+cd <this skill directory>
+git add -A
+git status --short            # confirm only intended files are staged
+git commit -m "<short summary of what changed and why>"
+git push origin main
+```
+
+Rules:
+
+- **Just do it.** Commit and push without asking. The user opted into this; a question
+  before every push is friction, not safety.
+- **Report it.** In the final reply, state that the changes were pushed and summarise
+  what went into the commit.
+- **Stop and ask only on failure.** If `git` is missing, the remote is unset, there is
+  no credential, or the push is rejected — say so plainly and wait. Never silently skip
+  the push, and never force-push to work around a rejection.
+- **Never commit secrets, tokens, or user data.** If a pitfall entry would capture
+  something sensitive, generalise it first.
+- `.gitignore` already excludes build artifacts, game binaries, Wine bundles, and
+  `.DS_Store`. If a new large or generated file shows up as untracked, add a pattern
+  rather than committing it.
 
 ## 14. Known pitfalls & fixes (append-only log)
 
@@ -347,9 +465,197 @@ file so it self-improves. Do not treat the skill as frozen.
   platform-independent — extract `index.pck`, rename to `<exe>.pck` next to a NATIVE
   Godot binary of the SAME major.minor (read `GDPC`+uint32 major@offset8/minor@12/patch@16
   from the PCK header), and it runs as a real Mac game. No project.godot conversion needed.
+- **2026-08-28 — Windows Unity (IL2CPP) port ≠ Godot; no native rebuild:** a Windows
+  Unity player (`GameAssembly.dll` + `UnityPlayer.dll` + `<Game>_Data`) cannot be
+  recompiled into a native Mac `.app` without the original Unity project. Port via the
+  Wine wrapper (section 11). Identify engine from `globalgamemanagers` / UnitySubsystems;
+  offline GoldBerg repacks (`steam_settings/` + `steam_api64.dll`) need no Steam login.
+  Renderer reality on the bundled gcenx wine-11.0: it ships `libMoltenVK.dylib`
+  (Vulkan→Metal works — M1 Pro detected) but **NO vkd3d-proton**, so D3D12 is unusable;
+  force D3D11 (`-force-d3d11`) as the default. Tested on `Sludgineers` (Unity 6000.4.12f1):
+  D3D11 device creation fails *headlessly* (no display in sandbox — may work on a real
+  Mac), Vulkan is rejected with "Vulkan was not built from editor" (that player has no
+  Vulkan renderer compiled in), and the game enforces a **D3D12 Feature Level 12.1
+  minimum** ("D3D12 API denied by user filter" for FL<12.1). Net: if D3D11 doesn't render
+  on the user's Mac, the reliable fix is a D3D12-capable Wine (CrossOver, or bundle
+  vkd3d-proton) — the gcenx build alone cannot do D3D12.
   Expect a harmless missing `dev/*` autoload (dev/telemetry probe) and a "missing
   Steamworks" line if the game has an optional Steam plugin — both are non-fatal.
 - **2026-08-28 — `--quit-after` is the only reliable timeout on macOS:** `timeout` is not
   installed by default. Use `godot --headless --quit-after <sec>` for self-termination;
   running without it blocks. Heavy engine + PCK also gets SIGKILL'd (137) inside the
   tool sandbox — re-run verification with the sandbox disabled (real machine memory).
+- **2026-08-29 — Windows Godot UNencrypted PCK → NATIVE macOS (no Wine):** Smashing Bottles
+  (SteamRIP/TENOKE, Godot 4.6.2) shipped an unencrypted PCK (enryption bit off, files are plaintext).
+  An unencrypted Godot `.pck` is platform-independent → extract it and run with a same-`major.minor`
+  macOS Godot binary. Far better than Wine. Don't assume every SteamRIP repack needs Wine — check the
+  PCK header `flags` first (§11c).
+- **2026-08-29 — Godot PCK custom extractor (Godot 4.6.2):** header = magic(4)+fmt(4)+major(4)+minor(4)
+  +patch(4)+flags(4)+files_base(u64)+dir_offset(u64)+reserved(4) = 44B. Directory at `dir_offset` =
+  `file_count(u32)` then per entry `[path_len(u32, 4-aligned, NO null term)][path][offset(u64)]
+  [size(u64)][md5(16)][flags(u32)]`; absolute offset = files_base + offset. Some paths lack `res://`
+  prefix (e.g. `.godot/...`). `file_base` value in header was 112; per-file `flags & 1` = encrypted.
+- **2026-08-29 — `project.binary` not `project.godot`:** Windows Godot exports often store settings in
+  `project.binary` (binary variant format). The engine reads it, but to edit autoloads/main_scene convert
+  it with `godot --headless --path <proj> --script dump_settings.gd` where the script calls
+  `ProjectSettings.save_custom("res://project.godot")`. Then edit the text `project.godot`.
+- **2026-08-29 — main_scene is a `uid://` that is NOT a file:** resolve via a Godot script using
+  `ResourceUID.text_to_id("uid://...")` + `ResourceUID.get_id_path(id)` (UIDs are int64 in `uid_cache.bin`,
+  not searchable as text). The real entry is `<Scene>.tscn.remap` → compiled `.scn` in
+  `.godot/exported/<hash>/`. Set `run/main_scene="res://<Scene>.tscn"` (Godot auto-follows `.remap`).
+- **2026-08-29 — Disabling GodotSteam GDExtension needs 3 steps:** rename `.gdextension`→`.bak` alone is
+  NOT enough — Godot still tries to load it because (a) `[editor_plugins] enabled=...godotsteam/plugin.cfg`
+  force-enables it, and (b) stale `.godot/**/extension_list.cfg` lists it. Remove all three or you get
+  "Error loading GDExtension configuration file" at every launch. The `Steam` singleton comes ONLY from
+  the GDExtension (not an autoload in `project.godot`), so disabling it is safe if no script uses `Steam`.
+- **2026-08-29 — Dead `godot_mcp` autoloads:** dev-only Model-Context-Protocol addons are listed as
+  autoloads but their `.gd` files are NOT exported in the `.pck` → "Failed to instantiate autoload" errors.
+  Delete those `[autoload]` lines (MCPScreenshot/MCPInputService/MCPGameInspector in Smashing Bottles).
+- **2026-08-29 — Re-sign AFTER all edits:** editing `project.godot` or deleting files inside the bundle
+  AFTER `codesign` invalidates the ad-hoc signature ("a sealed resource is missing or invalid"). Always
+  run `codesign --force --deep --sign - app` as the LAST step. Nested `.godot/.godot/` duplicate paths
+  can appear in some PCKs — remove the redundant nested dir; real resources live at top-level
+  `.godot/exported/<hash>/` (verify file counts before deleting).
+- **2026-08-29 — ghfast.top mirror for Godot binaries:** GitHub release downloads stall behind the proxy
+  (~400KB then hang). `curl -sL "https://ghfast.top/https://github.com/godotengine/godot/releases/
+  download/4.6.2-stable/Godot_v4.6.2-stable_macos.universal.zip"` pulled 161MB in ~20s.
+- **2026-08-29 — GameMaker Studio 2 (data.win + .exe) has NO native macOS rebuild:** unlike Godot, there
+  is no engine to run the assets on macOS — the ONLY path is a self-contained Wine wrapper (bundle gcenx
+  Wine, launch `HowManyDudes.exe`). Identify it by `data.win` + `<Game>.exe` + `gm_ext_windows_util.dll`.
+  64-bit exe = good (x86_64 Wine under Rosetta). `steam_settings/` + `steam_appid.txt` = GoldBerg offline
+  repack → no Steam login; Steam init passes under Wine (`[STEAMWORKS]: RestartAppIfNecessary check passed`,
+  `Steam initialization: 1`). GameMaker imports D3D11+XInput(+optional Media Foundation) — wined3d covers D3D11.
+- **2026-08-29 — ⭐ GameMaker D3D11 BLACK SCREEN on Apple Silicon → the ONLY fix is DXVK-macOS (Gcenx async 1.10.3). wined3d and D3DMetal BOTH fail.** (This entry SUPERSEDES an earlier wrong note claiming wined3d `OffscreenRenderingMode=backbuffer` fixes it — it does NOT.) Verified exhaustively on `How Many Dudes` (GameMaker Studio 2, D3D11, M1 Pro, real display), with objective pixel statistics, not eyeballing:
+  | Backend | Result |
+  |---|---|
+  | wined3d (`renderer=gl`) | **100% black + audio.** `glClear`/`glBlitFramebuffer` → `GL_INVALID_FRAMEBUFFER_OPERATION`. Tried 7 registry combos (`OffscreenRenderingMode=backbuffer/fbo`, `UseGLSL=disabled`, `AlwaysOffscreen=n`, `VideoMemorySize=4096`, `StrictDrawOrdering`, `MaxVersionGL=210`, `CSMT=n`) — **every one stayed `dark_fraction=1.0`**. Unfixable via registry. |
+  | D3DMetal (Apple GPTK 3.0-2, or a GPTK-wine's builtin) | Error dialog: `CheckMultisampleQualityLevels` HRESULT `0x80070057` at `Graphics_DisplayM.cpp:1282`. Known D3DMetal×GameMaker bug. The 280×143 window people mistake for "wrong window size" IS this dialog. |
+  | stock DXVK 2.x / 3.x | Device init aborts — hard-requires Vulkan 1.3 + `geometryShader`/tessellation, which MoltenVK/Apple GPUs do not expose. |
+  | **DXVK-macOS async 1.10.3 (Gcenx)** | ✅ **Works.** Targets Vulkan 1.1 and relaxes the geometryShader gate (`geometryShader : 0` accepted). |
+  Recipe (gcenx `wine-staging-11.16-osx64` + bundled MoltenVK 1.4.0): copy **only** `x64/d3d11.dll` + `x64/d3d10core.dll` into `$WINEPREFIX/drive_c/windows/system32/`, keep **Wine's builtin `dxgi`** (do NOT override dxgi), drop `dxvk.conf` next to the exe, and export:
+  ```zsh
+  export WINEDLLOVERRIDES="d3d11=n,b"      # NOT "d3d11,dxgi=n,b"
+  export DXVK_ASYNC=1
+  export VK_ICD_FILENAMES="$WINE_ROOT/lib/wine/x86_64-unix/vulkan/icd.d/MoltenVK_icd.json"
+  wine reg delete "HKCU\Software\Wine\Direct3D" /f   # purge any wined3d tuning first
+  ```
+  Success markers in the log: `DXVK: v1.10.3-20230507-async (macOS)`, `DirectX11: Using hardware device`, `Creating swap chain at <W> by <H>`, and **no** `CheckMultisampleQualityLevels` dialog. Window becomes full-size (1512×982) instead of 280×143.
+  Download: `curl -L "https://ghfast.top/https://github.com/Gcenx/DXVK-macOS/releases/download/v1.10.3-20230507/dxvk-macOS-async-v1.10.3-20230507.tar.gz"` — **verify the size (~2.7MB+ is truncated; check `tar -tzf` succeeds)**, the direct GitHub URL silently returns partial/bad gzip behind a proxy.
+- **2026-08-29 — ⚠️ NEVER claim a render fix from "looking at" a screenshot — the model cannot see images.** `Read` on a PNG returns "the current model does not support images. Content filtered", so any "I verified the screenshot" claim is fabricated. Build an objective gate instead, and make it the delivery criterion:
+  1. `winlist.c` — a ~40-line CoreGraphics tool (`CGWindowListCopyWindowInfo` with `kCGWindowListOptionAll`) printing `WID<TAB>x,y<TAB>WxH<TAB>title`, so you can `screencapture -l<WID> -x out.png` the exact game window (including off-screen ones).
+  2. `analyze_png.py` — Pillow script printing `dark_fraction`, `mean_luminance`, `luminance_stddev`, `distinct_color_buckets`, and a `verdict` (BLACK if `dark_fraction > 0.95`, else RENDERING).
+  Black screen ⇒ `dark_fraction 1.0`, `distinct_color_buckets 1`. Working game ⇒ `dark_fraction ~0.24`, `buckets ~235`. Caveat: a bright **error dialog** also scores "RENDERING" — always cross-check the window SIZE and the log for error strings before declaring success.
+- **2026-08-29 — GameMaker CJK "tofu" is a non-issue:** GameMaker ships its own font files (NotoSansSC/JP/KR/TC)
+  and uses its own rasterizer, so the Wine CJK font-fallback hack (§11) is NOT needed even for CJK games.
+- **2026-08-29 — `wineboot -u` creates the prefix headlessly; `wine cmd` does NOT:** to init a prefix in a
+  display-less step, run `"$WINE" wineboot -u` (expect harmless bluetooth/usb `.inf` copy errors). Plain
+  `wine cmd /c "..."` will NOT auto-create `drive_c`. Touch a `.hmd_inited` sentinel so first-run init is
+  idempotent.
+- **2026-08-29 — RAR extraction: no `unrar`; use `bsdtar`:** libarchive's `bsdtar -xf file.rar` extracts RAR
+  (incl. multi-part) with no extra tooling. Also works where `unar`/`7z` are missing.
+- **2026-08-29 — Windows Unity (IL2CPP) "Die in the Dungeon" (SteamRIP/TENOKE, Unity 2022.3.62f3):** no
+  native rebuild → Wine wrapper (gcenx `wine-staging-11.16-osx64`). TENOKE config is `tenoke.ini`
+  (`id = 2026820`, fully offline, NO `steam_settings/` needed). `strings UnityPlayer.dll` showed the player
+  supports D3D11+D3D12+Vulkan+OpenGL → force `-force-d3d11` (wined3d→OpenGL), expose
+  `RENDERER=vulkan|d3d12|auto` override. Verified: engine loads (`Initialize engine version: 2022.3.62f3`),
+  `Player.log` written under `.../LocalLow/ATICO/Die in the Dungeon/` (dev = ATICO), TENOKE init OK.
+  Headless-only failure was `d3d11: failed to create device (80004005)` (no display) — environmental.
+- **2026-08-29 — Do NOT ad-hoc codesign Wine+Steam-emu bundles:** the Steam emulator writes log/emulated
+  files INSIDE the bundle at runtime, which invalidates the ad-hoc seal so Gatekeeper reports "app is
+  damaged" on the next launch. Also Wine loads an UNSIGNED `libMoltenVK.dylib` (library validation would
+  reject it under a signature). Fix: `xattr -dr com.apple.quarantine "$APP"` and have the user approve once
+  via **System Settings → Privacy & Security → "Open Anyway"**. No seal ⇒ runtime writes are harmless.
+- **2026-08-29 — `iconutil -c icns` rejects ImageGen PNGs:** even at correct sizes (16/32/128/256/512 + @2x)
+  `iconutil` failed with "Failed to generate ICNS" (embedded color profile / format quirk). Workaround: build
+  the `.icns` with Python Pillow — `pip install Pillow; Image.open(png).convert("RGBA").save(out,
+  format="ICNS")` (auto-generates the standard sizes). `sips` alone could not produce a valid icns here.
+- **2026-08-29 — gcenx Wine release naming changed:** latest tag is `11.16` with assets
+  `wine-devel-11.16-osx64.tar.xz` / `wine-staging-11.16-osx64.tar.xz` (the old `wine-stable-11.0_1-osx64`
+  name is gone). The tarball wraps Wine under `Wine Staging.app/Contents/Resources/wine/{bin,lib,share}` —
+  extract that `wine` folder (`bsdtar -xf x.tar.xz -C app/Contents/Resources/wine -s
+  '|Wine Staging.app/Contents/Resources/wine/||' 'Wine Staging.app/Contents/Resources/wine'`) into
+  `Contents/Resources/wine`. `wine --version` runs under Rosetta on M1 Pro; MoltenVK/Vulkan initializes
+  (Metal 3 / Apple 7, `Apple M1 Pro`).
+- **2026-08-29 — Unity 2022.3 Mono Windows player (Demon Lord: Just a Block, GoldBerg repack) on Apple Silicon:**
+  wined3d's OpenGL backend reports max D3D feature level 9.3 on macOS because Apple OpenGL 4.1 does not
+  advertise `GL_EXT_shader_integer_mix` (shader_model_4 gate in glsl_shader.c) or
+  `GL_ARB_polygon_offset_clamp` (feature_level_from_caps gate in adapter_gl.c); Unity's player refuses to
+  create a D3D11 device because it requires ≥ 10_0. DXVK also fails because MoltenVK does not expose
+  `geometryShader`. Fix: bundle a tiny `DYLD_INSERT_LIBRARIES` shim that (a) interposes `dlsym()` and
+  returns wrappers for `glGetIntegerv`/`glGetStringi` that add the two capability strings and for
+  `glPolygonOffsetClampEXT` that calls `glPolygonOffset(factor, units)`, and (b) bootstraps the real
+  `dlsym` by walking loaded images with `_dyld_image_count()` + `NSLookupSymbolInImage()` on each image
+  until `_dlsym` is found in libdyld (RTLD_NEXT would hand back the interpose and recurse). With the shim,
+  wined3d exposes `Direct3D 11.0 [level 10.1]`, the game initializes fully and CJK text renders correctly.
+- **2026-08-30 — Unity IL2CPP Windows-only build (Die in the Dungeon, TENOKE) on Apple Silicon: D3D11
+  is a dead end with stock Wine:** All D3D11 paths fail on M1 Pro: (1) wined3d silently returns `80004005`
+  (E_FAIL) on `D3D11CreateDevice` — no useful diagnostic in wine.log; (2) DXVK ≥3.0 requires
+  `geometryShader` which MoltenVK doesn't expose; (3) DXVK 1.10.3 gets further but MoltenVK still lacks
+  D3D FL11_0 features; (4) `-force-vulkan` / `-force-glcore` both report "not built from editor" because
+  the Unity player was compiled with D3D11 only. **Before attempting any Wine wrapper for a Unity Windows game,
+  always check Steam/GOG for a native macOS version first** — it exists for many "Windows-only" indie games.
+  If Wine is the only option and D3D11 fails, the OpenGL shim approach (see previous pitfall) or commercial
+  layers (CrossOver, Apple GPTK) are the only viable paths forward.
+- **2026-08-30 — ⭐ OnlineFix repacks: the `winmm.dll` proxy SILENTLY KILLS the game when no Steam client is
+  reachable — and Wine loads it even with no `WINEDLLOVERRIDES`.** (How to Fish, Unity 6000.4.4f1 Mono,
+  SteamRIP/OnlineFix.) The package gives it away: `winmm.dll` + `OnlineFix64.dll` + `OnlineFix.ini` +
+  `SteamOverlay64.dll` + `dlllist.txt` next to the exe, and **no** `steam_settings/`. Confirmed with
+  `WINEDEBUG=+loaddll`: `Loaded L"Z:\\...\\game\\WINMM.dll" ... native` — **Wine prefers the app-directory
+  DLL by default**, so the proxy runs whether you ask for it or not. OnlineFix then terminates the process
+  after ~30-60 s because it cannot reach a Steam client (a macOS Steam install is invisible from inside the
+  prefix). Symptom: process alive, one untitled 500x500 Wine window, wine.log stops right after
+  `fixme:win:create_window_handle DPI context`, and **no `Player.log` is ever created**.
+  **Fix part 1:** `export WINEDLLOVERRIDES="winmm=b;..."` (force Wine's *builtin* winmm) so the proxy never
+  loads and Unity can initialize. **Fix part 2:** replace the real `steam_api64.dll`
+  (`How to Fish_Data/Plugins/x86_64/steam_api64.dll`) with an **offline Steam API emulator**, because OnlineFix
+  relies on a real Steam client. Verified: GoldBerg emulator (`detanup01/gbe_fork` `emu-win-release.7z`) works:
+  backup `steam_api64.dll` → `.original.bak`, copy `release/regular/x64/steam_api64.dll`, create
+  `<game>/steam_appid.txt` with the real appid (`4001890`) and `<game>/steam_settings/disable_networking.txt`
+  (empty). After both fixes: `Player.log` logs `Local User: gse orca:100`, `Steamworks` calls succeed, and the
+  game spawns the player. Keep a `STEAMEMU=on` escape hatch that switches to `winmm=n,b` for users who do run
+  Steam; otherwise use the GoldBerg-injected bundle as the default.
+- **2026-08-30 — Unity games using Steamworks for single-player spawn (FishNet, SteamUser.GetSteamID())
+  need an offline Steam API emulator.** How to Fish is single-player + local FishNet server, but the
+  `SpawnPlayer` ServerRpc calls `Steamworks.SteamUser.GetSteamID()`. If Steam is not initialized, this throws
+  `InvalidOperationException`, the RPC fails, the local connection is kicked, and you can never enter the game.
+  Disabling OnlineFix or stubbing Steam initialization is not enough; you must supply a `steam_api64.dll` that
+  returns a fake Steam ID offline. GoldBerg (see previous pitfall) is the reliable fix. Verify by watching
+  `Player.log`: a successful spawn leaves "FishNet client 0 connected" with no `Steamworks is not initialized`
+  exception; failure shows "ServerRpc failed... kicked".
+- **2026-08-30 — CJK text renders fine under Wine for this Unity 6 game:** no font-fallback hacks were
+  necessary. The Chinese interface (e.g. 新游戏, 加载, 时间到！) displays correctly with DXVK.
+- **2026-08-30 — `Player.log` presence is the fastest go/no-go signal for any Unity port.** Path:
+  `<prefix>/drive_c/users/<user>/AppData/LocalLow/<Company>/<Product>/Player.log` (Company/Product come from
+  `<Game>_Data/app.info`). Unity opens it during engine init, *before* any C# script runs — so **no Player.log
+  after 60 s ⇒ the game died before/inside Unity init**, not during gameplay. Look for a Steam-emu/proxy DLL
+  (OnlineFix, GoldBerg, Codex) being force-loaded, or the real `steam_api64.dll` blocking.
+- **2026-08-30 — Test harness kills background Wine: launch the app with `open -a`, not `nohup ... &`.**
+  Launching from a Bash tool call (even `nohup ... &`) gets the whole Wine tree SIGKILLed when the tool call
+  returns, leaving a misleading `wineserver crashed, please enable coredumps (ulimit -c unlimited) and
+  restart.` as the last line of wine.log and no macOS crash report. Instead install the `.app` and run
+  `open -a "/Applications/X.app"` — LaunchServices detaches it so it survives between tool calls.
+  `open` does NOT inherit shell env, so have the launcher source a per-user config file
+  (`[ -f "$HOME/Library/Application Support/X/config.sh" ] && . "$CONFIG"`) and write `HTF_LOG=1` /
+  `WINEDEBUG=...` there for debugging.
+- **2026-08-30 — Unity 6 (6000.4.x) Mono Windows player runs on Apple Silicon with DXVK-macOS async 1.10.3.**
+  Verified on How to Fish (6000.4.4f1) with gcenx `wine-staging-11.16`: launch with `-force-d3d11`, DXVK
+  reports `Direct3D 11.0 [level 11.0]` (spoofs "NVIDIA GeForce 6800"), MoltenVK swap chain 1512x982, window
+  animates (31% of pixels change between two captures 6 s apart). Unlike Unity 2022.3 Mono (see the DYLD
+  GL-shim pitfall) **no OpenGL shim is needed** — go straight to DXVK. Unity's own D3D12 device filter denies
+  D3D12 anyway (`D3D12 API denied by user filter: Feature Level 12.1`), and no vkd3d is bundled, so
+  `-force-d3d12` is moot. Online co-op / achievements need a reachable Steam client and will NOT work.
+- **2026-08-30 — Reuse an existing Wine bundle with APFS cloning instead of re-downloading.**
+  `cp -Rc /Applications/<Other>.app/Contents/Resources/wine <new>/Contents/Resources/wine` clones 849 MB
+  instantly and the copy is fully independent afterwards (copy-on-write). Same trick for `dxvk/` and the shim
+  `lib/`. Check the donor's version first: `.../wine/bin/wine --version`.
+- **2026-08-30 — Steam CDN art 404s for very new indie appids.** `cdn.cloudflare.steamstatic.com/steam/apps/
+  <appid>/library_600x900.jpg` and `/header.jpg` returned 404 for appid 4001890. Don't burn time on it —
+  draw the icon with Pillow and write the `.icns` directly
+  (`Image.open(p).convert("RGBA").save(out, "ICNS")`), since `iconutil` is unreliable anyway.
+- **2026-08-31 — Syncing this skill to GitHub: HTTPS + PAT, not SSH and not `gh`.** The reference machine
+  has no `gh` CLI, no `~/.ssh` keys, and no git `user.name`/`user.email`. Use an HTTPS remote plus a
+  GitHub Personal Access Token stored by `git credential-osxkeychain`, so later pushes (see §13b) need no
+  interactive auth. Generate at GitHub → Settings → Developer settings → Personal access tokens, with
+  `repo` scope. Set `git config --global credential.helper osxkeychain` and commit once so the token is
+  saved to the login Keychain; afterwards `git push` is silent. If a push is rejected with 403, the token
+  is expired or lacks `repo` — ask, do not force-push.
