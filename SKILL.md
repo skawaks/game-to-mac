@@ -397,24 +397,39 @@ file so it self-improves. Do not treat the skill as frozen.
   into the README "Caveats" section (condensed; detail stays here in §14).
 - This rule survives sessions: every future game-to-mac run re-applies it.
 
-### 13b. Auto-commit and push to GitHub (standing rule)
+### 13b. Self-sync — owner only (standing rule)
+
+> **Scope guard.** This auto-push rule fires **only** when this skill directory's
+> `origin` remote is exactly `https://github.com/skawaks/game-to-mac` (the maintainer's
+> own copy). If you are using a fork, a clone under a different account, or any other
+> remote, **do not push here** — commit your changes locally and open a pull request
+> instead. This prevents a third party's agent from pushing to the maintainer's repo.
 
 This skill directory **is** a git repository tracking
-`https://github.com/skawaks/game-to-mac` (branch `main`). After finishing the
-iteration above, sync it — do not leave improvements stranded on one machine:
+`https://github.com/skawaks/game-to-mac` (branch `main`) on the maintainer's machine.
+After finishing the iteration above, sync it so improvements are not stranded on one
+machine — but only when the remote is the maintainer's own repo:
 
 ```bash
 cd <this skill directory>
-git add -A
-git status --short            # confirm only intended files are staged
-git commit -m "<short summary of what changed and why>"
-git push origin main
+# safety check: only auto-push to the maintainer's own repo, never a fork/stranger's
+REMOTE=$(git remote get-url origin 2>/dev/null || true)
+if [ "$REMOTE" = "https://github.com/skawaks/game-to-mac.git" ] \
+   || [ "$REMOTE" = "git@github.com:skawaks/game-to-mac.git" ]; then
+  git add -A
+  git status --short            # confirm only intended files are staged
+  git commit -m "<short summary of what changed and why>"
+  git push origin main
+fi
 ```
+
+For any other remote: skip the push, commit locally if useful, and in the final reply
+tell the user how to contribute (`fork → commit → open a PR`).
 
 Rules:
 
-- **Just do it.** Commit and push without asking. The user opted into this; a question
-  before every push is friction, not safety.
+- **Just do it (owner only).** When the remote matches, commit and push without asking;
+  a question before every push is friction, not safety.
 - **Report it.** In the final reply, state that the changes were pushed and summarise
   what went into the commit.
 - **Stop and ask only on failure.** If `git` is missing, the remote is unset, there is
@@ -670,7 +685,7 @@ Rules:
   `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy git push origin main`
   Expect to retry 2-3 times; the first direct attempt can hang ~75 s before connecting. To verify a push,
   use the GitHub API — `raw.githubusercontent.com` stayed unreachable even while `api.github.com` worked:
-  `curl -s https://api.github.com/repos/skawaks/game-to-mac/contents/` (check the `size` field; a stale
+  `curl -s https://api.github.com/repos/<owner>/<repo>/contents/` (check the `size` field; a stale
   README that was previously 0 bytes is the clearest signal that the push landed).
 - **2026-08-31 — Adopting an existing remote repo without force-pushing.** When the GitHub repo already has
   commits (e.g. files added via the web UI) and you initialise locally, the histories are unrelated and a

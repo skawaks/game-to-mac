@@ -137,9 +137,9 @@ GitHub release downloads often stall behind a proxy. Use the
 ## Install
 
 `game-to-mac` is a directory with no build step: `SKILL.md` (the playbook), this
-`README.md`, and a `.gitignore`. Any agent that loads skills from a directory will
-understand it — there is no vendor-specific format beyond the YAML frontmatter at the
-top of `SKILL.md`.
+`README.md`, a `.gitignore`, and a `LICENSE` (MIT). Any agent that loads skills from a
+directory will understand it — there is no vendor-specific format beyond the YAML
+frontmatter at the top of `SKILL.md`.
 
 ```bash
 # Claude Code
