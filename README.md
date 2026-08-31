@@ -137,9 +137,13 @@ GitHub release downloads often stall behind a proxy. Use the
 ## Install
 
 `game-to-mac` is a directory with no build step: `SKILL.md` (the playbook), this
-`README.md`, a `.gitignore`, and a `LICENSE` (MIT). Any agent that loads skills from a
-directory will understand it — there is no vendor-specific format beyond the YAML
-frontmatter at the top of `SKILL.md`.
+`README.md`, a `.gitignore`, and a `LICENSE` (MIT). The playbook follows the common
+"SKILL.md with YAML frontmatter" convention used by several agents, while this
+`README.md` is the human-readable guide.
+
+### Pick your agent's skills directory
+
+Different agents use different folders. Copy or clone this repo into the right one:
 
 ```bash
 # Claude Code
@@ -152,11 +156,29 @@ cp -R game-to-mac ~/.codex/skills/game-to-mac
 cp -R game-to-mac ~/.workbuddy/skills/game-to-mac
 ```
 
-Or clone it straight into place:
+Or clone straight into place (replace the destination with your agent's skills folder):
 
 ```bash
+# WorkBuddy example; adjust the path for Claude Code / Codex / your agent.
 git clone https://github.com/skawaks/game-to-mac.git ~/.workbuddy/skills/game-to-mac
 ```
+
+### If your agent expects a different skill entry file
+
+Some agents read `README.md` as the skill instructions; this repo keeps the playbook in
+`SKILL.md` and the docs in `README.md`. If your agent does not pick up `SKILL.md`
+automatically, either:
+
+- tell your agent to use `SKILL.md`, or
+- copy `SKILL.md` over `README.md` inside the skill directory so the agent loads the
+  playbook:
+
+```bash
+cd ~/.workbuddy/skills/game-to-mac   # or ~/.claude/skills/game-to-mac, etc.
+cp SKILL.md README.md
+```
+
+Do that **only** inside your local copy; do not change the upstream repo's `README.md`.
 
 ---
 
