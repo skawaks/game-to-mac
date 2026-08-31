@@ -655,7 +655,26 @@ Rules:
 - **2026-08-31 — Syncing this skill to GitHub: HTTPS + PAT, not SSH and not `gh`.** The reference machine
   has no `gh` CLI, no `~/.ssh` keys, and no git `user.name`/`user.email`. Use an HTTPS remote plus a
   GitHub Personal Access Token stored by `git credential-osxkeychain`, so later pushes (see §13b) need no
-  interactive auth. Generate at GitHub → Settings → Developer settings → Personal access tokens, with
-  `repo` scope. Set `git config --global credential.helper osxkeychain` and commit once so the token is
-  saved to the login Keychain; afterwards `git push` is silent. If a push is rejected with 403, the token
-  is expired or lacks `repo` — ask, do not force-push.
+  interactive auth. Generate at GitHub → Settings → Developer settings → Personal access tokens; for a
+  **public** repo the `public_repo` scope is enough (`repo` also works but additionally grants access to
+  every private repo). Store it without putting it in argv:
+  `git credential-osxkeychain store <<< "protocol=https\nhost=github.com\nusername=<user>\npassword=<token>"`
+  with `git config --global credential.helper osxkeychain` set; afterwards `git push` is silent. If a push
+  is rejected with 403, the token is expired or lacks the scope — ask, do not force-push.
+- **2026-08-31 — `git push` from inside an agent tool sandbox fails with SIGKILL (137) or `CONNECT tunnel
+  failed, response 502`.** The sandbox injects `HTTP_PROXY`/`HTTPS_PROXY` pointing at a local port
+  (`127.0.0.1:<port>`), and that proxy is intermittent: the same `git fetch` can succeed and then 502 a few
+  minutes later, and once it degrades plain `curl` also returns `000` / exit 56. Push exits 137 with **no
+  output at all** — easy to misread as a real failure. Fix: re-run outside the sandbox **and** unset the
+  proxy vars:
+  `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy git push origin main`
+  Expect to retry 2-3 times; the first direct attempt can hang ~75 s before connecting. To verify a push,
+  use the GitHub API — `raw.githubusercontent.com` stayed unreachable even while `api.github.com` worked:
+  `curl -s https://api.github.com/repos/skawaks/game-to-mac/contents/` (check the `size` field; a stale
+  README that was previously 0 bytes is the clearest signal that the push landed).
+- **2026-08-31 — Adopting an existing remote repo without force-pushing.** When the GitHub repo already has
+  commits (e.g. files added via the web UI) and you initialise locally, the histories are unrelated and a
+  normal push is rejected. Instead of force-pushing, graft your work on top:
+  `git init -b main && git remote add origin <url> && git fetch origin main && git reset --soft origin/main`
+  `reset --soft` moves HEAD to the remote tip while leaving the working tree untouched, so the next commit
+  contains only your changes and the push is a clean fast-forward.
