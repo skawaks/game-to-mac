@@ -209,6 +209,7 @@ packaging, signing, verification.
 | Windows Godot, **encrypted** PCK | Wine | `gamblers-table` (Godot 4, SteamRIP) | ⚠️ Runs via Wine; CJK needs the font fix |
 | GameMaker Studio 2 (`data.win`) | Wine + **DXVK-macOS async 1.10.3** | How Many Dudes (M1 Pro) | ✅ Only working config — see [caveats](#caveats) |
 | Unity 6 (6000.4.x) Mono | Wine + DXVK-macOS 1.10.3, `-force-d3d11` | How to Fish (6000.4.4f1) | ✅ No GL shim needed |
+| Unity 6 (6000.3.x) IL2CPP, D3D11-only | Wine + DXVK-macOS 1.10.3, `-force-d3d11`, GoldBerg emu, `MVK_CONFIG_LOG_LEVEL=error` | Bottle Flip Inc Demo (6000.3.8f1, M1 Pro) | ✅ Playable, audio on; descriptor-pool warnings are non-fatal noise |
 | Unity 2022.3 Mono | Wine + DYLD OpenGL shim | Demon Lord: Just a Block | ✅ wined3d reports D3D 11.0 level 10.1 |
 
 ### Partially working
@@ -224,7 +225,7 @@ Know these before you burn hours on them.
 | Case | Why it's stuck |
 | --- | --- |
 | **Encrypted Godot PCK, key unavailable** | The 32-byte AES key lives in the engine binary, never in the `.pck`. No key, no decrypt, no native rebuild. Wine is the only route. |
-| **Unity IL2CPP, D3D11-only, Apple Silicon** | The player ships D3D11 only (`-force-glcore`/`-force-vulkan` "not built"; `-force-d3d12` needs vkd3d, which the gcenx wine lacks). Under DXVK-macOS 1.10.3 the camera-clear draws, then the first real scene draw hits a `VK_ERROR_OUT_OF_POOL_MEMORY` busy-loop on `UNIFORM_BUFFER_DYNAMIC` descriptors — Apple GPU / MoltenVK caps `maxDescriptorSetUniformBuffersDynamic` far below DXVK's hard-coded 6144, and a heavy scene (e.g. 28k objects) needs more per frame. The loop never yields → freeze on a static gray frame. Async-independent (`DXVK_ASYNC=0` no help); `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1` no help. wined3d D3D11 fails earlier at FL 9.3 (Apple GL 4.1 cap; a GL-capability `dlsym`-shim is bypassed by Wine's internal GL dispatch, so it can't raise the level). **Likely only solvable via CrossOver's D3D12→Metal** (no Vulkan descriptor pools). Check Steam/GOG for a native macOS build first. |
+| **Unity IL2CPP, D3D11-only, Apple Silicon** | The player ships D3D11 only (`-force-glcore`/`-force-vulkan` "not built"; `-force-d3d12` needs vkd3d, which the gcenx wine lacks). wined3d D3D11 fails at FL 9.3 (Apple GL 4.1 cap; a GL-capability `dlsym`-shim is bypassed by Wine's internal GL dispatch). DXVK-macOS 1.10.3 DOES work for many titles (see tested table) but spams non-fatal `VK_ERROR_OUT_OF_POOL_MEMORY` warnings on heavy scenes — suppress with `MVK_CONFIG_LOG_LEVEL=error`, do not mistake the spam for a freeze. Truly stuck only if DXVK itself cannot bring up the device. **Check Steam/GOG for a native macOS build first.** |
 | **GameMaker via wined3d or D3DMetal** | wined3d gives 100% black screen + audio (7 registry combos tried, all failed). D3DMetal crashes on `CheckMultisampleQualityLevels` `0x80070057`. Only DXVK-macOS async 1.10.3 works. |
 | **D3D12** | The bundled gcenx Wine has no vkd3d-proton, so D3D12 is unusable. Unity 6 additionally enforces D3D12 Feature Level 12.1. |
 | **Stock DXVK 2.x / 3.x on Apple GPUs** | Hard-requires Vulkan 1.3 + geometry/tessellation shaders. MoltenVK exposes neither. Device init aborts. |
