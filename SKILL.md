@@ -693,3 +693,59 @@ Rules:
   `git init -b main && git remote add origin <url> && git fetch origin main && git reset --soft origin/main`
   `reset --soft` moves HEAD to the remote tip while leaving the working tree untouched, so the next commit
   contains only your changes and the push is a clean fast-forward.
+- **2026-08-31 (CORRECTED 2026-09-03 — my original conclusion here was WRONG):** I claimed "Steam CDN is
+  blocked in the agent sandbox, so you can never fetch a Steam game." **False.** See the 2026-09-03 pitfall
+  below: SteamCMD running under Wine reaches Steam fine and downloads real depots. It is merely *slow*.
+  Lesson: `curl ... → HTTP 000` only proves that **curl through the sandbox proxy** is blocked. It does NOT
+  prove that a GUI/console app process is blocked. Never conclude "network blocked" from a curl probe alone —
+  run the real binary and watch its progress log for N minutes before giving up.
+
+- **2026-08-31 — ⭐ Whisky "WhiskyWine not installed" loop: inject a Wine build + a version-marker plist.**
+  If Whisky opens with a *Dependencies Setup* dialog stuck on "WhiskyWine not installed" (and its own runner
+  download is network-blocked), do NOT fight the GUI — sideload a known-good Wine:
+  1. Copy an extracted gcenx wine tree into Whisky's expected dir, inside the **sandbox container**:
+     `~/Library/Containers/com.isaacmarovitz.Whisky/Data/Library/Application Support/com.isaacmarovitz.Whisky/Libraries/Wine/{bin,lib,share}`
+     (source tree is `Wine Staging.app/Contents/Resources/wine/`). Ensure `bin/wine64` exists (`ln -s wine wine64`).
+  2. Whisky's `isWhiskyWineInstalled()` ONLY checks that `Libraries/WhiskyWineVersion.plist` decodes — so write
+     that plist with the REAL `SemanticVersion` shape (fields `major`,`minor`,`patch`,`preRelease`,`build`;
+     last two are **Strings**, NOT arrays — I got it wrong twice). Minimal body:
+     `<dict><key>version</key><dict><key>major</key><integer>2</integer><key>minor</key><integer>5</integer><key>patch</key><integer>0</integer><key>preRelease</key><string></string><key>build</key><string></string></dict></dict>`
+  3. Whisky IS sandboxed: it reads the **container** App Support path, not `~/Library/Application Support` —
+     files placed in the non-container path are invisible to it (that's why the first attempt failed).
+  4. Verify without the GUI: `pkill Whisky; /Applications/Whisky.app/Contents/MacOS/Whisky & sleep 9; screencapture -x /tmp/s.png`
+     then view the PNG — the bottle window (Run…/Open C: Drive) shows and no modal = fixed. `WhiskyCmd` CLI lives at
+     `/Applications/Whisky.app/Contents/Resources/WhiskyCmd` (`list`/`run`/`shellenv`) but launching via it from an
+     agent sandbox still hits the Steam-CDN block, so the actual Steam download must be triggered in the user's own GUI.
+     (CORRECTION 2026-09-03: that last clause is also wrong — see next pitfall.)
+
+- **2026-09-03 — ⭐⭐ RELIABLE WAY TO GET WINDOWS STEAM FILES ON THE MAC: SteamCMD under Wine (works, just slow).**
+  This is the path that finally unblocked the Bottle Flip Inc Demo port. Full recipe:
+  1. SteamCMD (`steamcmd.zip`, from `media.steampowered.com` or `partner.steamgames.com`) runs fine under the
+     bundled gcenx Wine. Run it as a **background task** and poll the log — do not judge by the first 2 minutes.
+  2. **Its bootstrap is ~29 MB and took ~14 minutes** (proxy rate-limits to ~35 KB/s). It prints
+     `[ 18%] Downloading update (5,599 of 29,732 KB)...` and DOES progress. It leaves `steamcmd.exe.old` +
+     `package/` behind. Once it prints `Update complete, launching Steamcmd...` it is ready.
+  3. Enumerate the app first to confirm depot IDs / sizes (works anonymously):
+     `+login anonymous +app_info_print <appid> +quit` → prints `depots` with each depot's `oslist`, `gid`,
+     `size` (uncompressed) and `download` (compressed) bytes.
+  4. Force the Windows build + target dir, then update:
+     ```
+     +@sSteamCmdForcePlatformType windows
+     +force_install_dir "Z:\\Users\\<you>\\<workspace>\\game"   # Wine maps /Users/... -> Z:\Users\...
+     +login <user> <pass> [<guard>]
+     +app_update <appid> validate
+     +quit
+     ```
+  5. **Anonymous login is NOT enough for a demo/free game** — you get
+     `ERROR! Failed to install app '<appid>' (No subscription)`. A licensed account is required even when the
+     app is free, because the *account* must hold the licence (check `config/config.vdf` for the appid).
+  6. **Never ask the user to paste their Steam password into chat.** Instead ship a `.command` file they
+     double-click: `read -r -s -p "Steam password (hidden): " PASS` then `nohup wine steamcmd.exe ... &`.
+     Password stays in a shell variable, never hits disk or the transcript. Support an optional Steam Guard arg
+     (omit it entirely when blank — passing an empty guard arg breaks login).
+  7. Budget ~1 to 1.5 hours per ~165 MB at this proxy speed. Start it early and do the packaging work meanwhile.
+
+- **2026-09-03 — ⭐⭐ Unity 6000 IL2CPP (D3D11-only) on Apple Silicon: DXVK descriptor-pool exhaustion loop freezes the first scene.** Bottle Flip Inc Demo (Unity 6000.3.8f1, appid 4966120, Heathen Steamworks Foundation). The player ships ONLY a D3D11 renderer: `-force-glcore`/`-force-vulkan` both report "not built from editor", and `-force-d3d12` is blocked because the gcenx wine has no vkd3d. Under DXVK-macOS async 1.10.3 the camera-clear (gray) frame draws, then the first real scene draw hits `VK_ERROR_OUT_OF_POOL_MEMORY: VkDescriptorPool exhausted pool of 6144 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC descriptors. Allocating descriptor dynamically.` in a TIGHT BUSY LOOP (hundreds of thousands of warnings in <1 min, wine.log grows to 150 MB+) that never yields → render-thread hang → main-thread deadlock → static gray frame forever. Root cause: Apple GPU / MoltenVK caps `maxDescriptorSetUniformBuffersDynamic` far below 6144, and this 28k-object scene needs more per frame; DXVK's dynamic-allocation fallback loops. **Async-independent** (`DXVK_ASYNC=0` does NOT help) and `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1` does NOT stop it either. **Currently unsolvable with gcenx wine 11.16 + DXVK-macOS 1.10.3** — no newer DXVK runs on MoltenVK (needs Vulkan 1.3 + geometryShader), and shrinking DXVK's pool just exhausts faster. The likely working path is **CrossOver's D3D12→Metal** (no Vulkan descriptor pools) — NOT bundled, needs network + license. Decisive diagnostic: `grep -c OUT_OF_POOL_MEMORY wine.log` — if it's in the hundreds of thousands, it's this, not a Steamworks stall.
+- **2026-09-03 — Unity IL2CPP D3D11 freeze is backend-specific, not Unity-flag-specific.** All `-disable-gfx-jobs`/`-noaudio`/`-nojobthreads`/`-disable-splash`/Windows-version workarounds fail identically because the freeze lives in the DXVK→MoltenVK descriptor path, not Unity logic. GoldBerg `gse orca:100` init succeeding is a RED HERRING — the freeze just happens to occur right after SteamTools init logging, so the Player.log "stops at SteamTools" is coincidental timing, not a Steamworks deadlock. Trust the wine.log descriptor loop, not the Player.log tail.
+- **2026-09-03 — GL-capability shim via DYLD_INSERT_LIBRARIES is BYPASSED by Wine's internal GL dispatch for wined3d capability detection.** The shim (interpose `dlsym` to inject `GL_EXT_shader_integer_mix` + `GL_ARB_polygon_offset_clamp` so wined3d reports D3D FL ≥ 10.0 on Apple GL 4.1) DOES load (`[glcap_shim] LOADED` markers confirm) and wined3d DOES resolve `glGetString`/`glGetIntegerv` through the interposed dlsym — but the wrapper functions are NEVER CALLED (no CALL logs). Wine's GL capability detection goes through Wine's own thunk/dispatch layer, not the resolved pointers. So for wined3d D3D11 on macOS, GL-capability shimming is ineffective: wined3d still caps at FL 9.3 (`wined3d_select_feature_level None of the requested D3D feature levels is supported`) → `d3d11: failed to create device and context (80004005)`. Do NOT re-attempt the dlsym-shim for wined3d; the only FL-cap fix is CrossOver/GPTK (D3D12→Metal) or patching wined3d itself. (Shim source kept at `tools_render/glcap_shim.c` for reference; compile `cc -arch x86_64 -dynamiclib`.)
+- **2026-09-03 — Launcher `DXVK_ASYNC` override-order bug.** If the launcher sets `export DXVK_ASYNC=1` AFTER sourcing the per-user `config.sh`, a `DXVK_ASYNC=0` in config.sh is silently ignored. Fix: `export DXVK_ASYNC="${DXVK_ASYNC:-1}"` so config.sh wins. (During Bottle Flip Inc diagnosis a "DXVK_ASYNC=0 didn't help" conclusion was INVALID because of this — it was actually still running async.)
