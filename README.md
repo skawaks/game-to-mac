@@ -210,6 +210,7 @@ packaging, signing, verification.
 | GameMaker Studio 2 (`data.win`) | Wine + **DXVK-macOS async 1.10.3** | How Many Dudes (M1 Pro) | ✅ Only working config — see [caveats](#caveats) |
 | Unity 6 (6000.4.x) Mono | Wine + DXVK-macOS 1.10.3, `-force-d3d11` | How to Fish (6000.4.4f1) | ✅ No GL shim needed |
 | Unity 6 (6000.3.x) IL2CPP, D3D11-only | Wine + DXVK-macOS 1.10.3, `-force-d3d11`, GoldBerg emu, `MVK_CONFIG_LOG_LEVEL=error` | Bottle Flip Inc Demo (6000.3.8f1, M1 Pro) | ✅ Playable, audio on; descriptor-pool warnings are non-fatal noise |
+| Unity Mono (no `GameAssembly.dll`, no `steam_api*.dll`) | Wine + DXVK-macOS 1.10.3, `-force-d3d11`, `MVK_CONFIG_LOG_LEVEL=error` | My Fire Is Bigger Than Yours — DEMO (Punch Pancake, M1 Pro) | ✅ Cleanest port: no GoldBerg (no Steam DRM), D3D12 auto-falls-back to D3D11, Mono runtime works under Wine |
 | Unity 2022.3 Mono | Wine + DYLD OpenGL shim | Demon Lord: Just a Block | ✅ wined3d reports D3D 11.0 level 10.1 |
 
 ### Partially working
