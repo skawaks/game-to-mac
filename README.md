@@ -211,6 +211,7 @@ packaging, signing, verification.
 | Unity 6 (6000.4.x) Mono | Wine + DXVK-macOS 1.10.3, `-force-d3d11` | How to Fish (6000.4.4f1) | ✅ No GL shim needed |
 | Unity 6 (6000.3.x) IL2CPP, D3D11-only | Wine + DXVK-macOS 1.10.3, `-force-d3d11`, GoldBerg emu, `MVK_CONFIG_LOG_LEVEL=error` | Bottle Flip Inc Demo (6000.3.8f1, M1 Pro) | ✅ Playable, audio on; descriptor-pool warnings are non-fatal noise |
 | Unity Mono (no `GameAssembly.dll`, no `steam_api*.dll`) | Wine + DXVK-macOS 1.10.3, `-force-d3d11`, `MVK_CONFIG_LOG_LEVEL=error` | My Fire Is Bigger Than Yours — DEMO (Punch Pancake, M1 Pro) | ✅ Cleanest port: no GoldBerg (no Steam DRM), D3D12 auto-falls-back to D3D11, Mono runtime works under Wine |
+| Unity 6 (6000.3.x) Mono + **SOVEREIGN** repack, retail build | Wine + DXVK-macOS 1.10.3, `-force-d3d11`; reuse `wine/`+`dxvk/`+`prefix/` from a sibling port via `cp -Rc` | My Fire Is Bigger Than Yours (6000.3.7f1, appid 4428630, M1 Pro) | ✅ 60 FPS, D3D 11.0 [level 11.0] on Apple M1 Pro. SOVEREIGN is offline — no Steam client, no GoldBerg surgery. Retail ships NotoSansSC + Unity.Localization, so Simplified Chinese works (demo does not) |
 | Unity 2022.3 Mono | Wine + DYLD OpenGL shim | Demon Lord: Just a Block | ✅ wined3d reports D3D 11.0 level 10.1 |
 
 ### Partially working
@@ -287,6 +288,19 @@ before attempting an unfamiliar engine.
 - Judge rendering numerically (`dark_fraction`, `distinct_color_buckets`), not visually.
   A bright error dialog also scores as "rendering", so always cross-check window size
   and log contents.
+- **If `screencapture` fails** (`could not create image from display`), the agent lacks
+  Screen Recording permission — fall back to three permission-free gates: (1) delete
+  `*.dxvk-cache`, relaunch, and confirm it regenerates and grows; (2) count a
+  once-per-frame Unity log warning over 10 s to get FPS; (3) confirm window geometry is
+  the real game size and the process survives minutes. Then ask the user to confirm
+  visually.
+
+**Steam repack emulators**
+- `SOVEREIGN` (`SOVEREIGN64.dll` + `SOVEREIGN.ini` + `steam_api64.svrn`) is fully offline
+  and needs no extra work. Switch UI language by editing `Language=` in `SOVEREIGN.ini`
+  **and** setting the launcher's `LANG`/`LC_ALL` — they must agree.
+- GoldBerg (`steam_settings/`) and TENOKE (`tenoke.ini`) are offline too. OnlineFix
+  (`winmm.dll` + `OnlineFix64.dll`, no `steam_settings/`) is not — see above.
 
 **Misc**
 - Wine prefix init needs `wineboot -u`; `wine cmd` will not create `drive_c`.
