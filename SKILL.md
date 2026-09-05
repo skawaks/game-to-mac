@@ -245,6 +245,65 @@ Do **all three**; do not deliver until they pass.
    ```
    Inspect a later frame (e.g. `/tmp/frame00000100.png`) for the game UI.
 
+## 10b. Render verification — one permission probe, then branch (Wine/Unity)
+
+Tools live in `tools_render/` **inside this skill** — do not rewrite them in /tmp,
+they will be gone next session:
+
+| File | What it does |
+| --- | --- |
+| `render_gate.sh` | Orchestrator. Launch, find the window, pick a path, print PASS/FAIL/INCONCLUSIVE. |
+| `winlist.c` | Window id/bounds/title lister. Needs **no** Screen Recording permission. |
+| `analyze_png.py` | Pixel statistics: `dark_fraction`, `color_buckets`, and a motion diff between two frames. |
+
+```bash
+zsh "$SKILL/tools_render/render_gate.sh" "/Applications/Game.app" --wait 45
+```
+
+**The rule that saves the most time: probe Screen Recording EXACTLY ONCE.**
+The agent process frequently lacks it, and `screencapture` fails with
+`could not create image from display`. Retrying via `osascript`, another app, or
+`-l <windowID>` never works — that is 5-6 wasted tool calls. `render_gate.sh`
+probes once and never touches `screencapture` again if it fails.
+
+### Path A — Screen Recording granted (pixel evidence)
+
+Two captures 6 s apart → `analyze_png.py` gates:
+
+| Metric | Gate | Catches |
+| --- | --- | --- |
+| `dark_fraction` | < 0.95 | black screen |
+| `color_buckets` | > 12 | flat solid fill |
+| motion (diff ratio) | > 0.001 | frozen first frame |
+
+A bright **error dialog** passes all three, so always cross-check the window
+geometry from `winlist`: `280x143` is the D3D `CheckMultisampleQualityLevels`
+failure dialog, `1512x982`-class is a real game window.
+
+### Path B — permission denied (three permission-free gates)
+
+1. **DXVK state cache regrowth (strongest).** Delete `*.dxvk-cache` (it lives
+   *next to the game exe*, not in the prefix), cold-start, and confirm it is
+   rebuilt. DXVK only appends an entry when it compiles a graphics/compute
+   pipeline — which only happens on real draw calls. Observed: 0 → 10,754 bytes
+   in 60 s.
+2. **Per-frame log warning rate = a free FPS meter.** Take the most repeated
+   line in the last 500 lines of `Player.log`, count it, wait 10 s, count again.
+   Unity's URP emits some warnings exactly once per frame, so the delta/10 is
+   the frame rate (observed 60/s = 60 FPS).
+3. **Window geometry + longevity** from `winlist`, plus `grep -c '^err:'` over
+   `dxvk-logs/*.log`.
+
+`render_gate.sh` prints `INCONCLUSIVE` (exit 2) when evidence is partial — that
+is the cue to ask the user to look, not to keep testing.
+
+### Selecting the right Player.log
+
+A prefix **cloned from a sibling port** carries that game's leftover logs, and
+picking the wrong one silently reports 0 FPS. Pick the `Player.log` whose parent
+directory equals the app name, fall back to newest mtime, and warn if it is
+older than ~10 minutes.
+
 ## 11. Windows Godot build fallback: Wine wrapper
 
 If the source is a **Windows Godot executable** with an **encrypted `.pck`** (common in SteamRIP repacks), you usually cannot rebuild a native macOS `.app` because the AES-256 key is baked into the Windows binary, not the `.pck`. The pragmatic route is a self-contained Wine-wrapped `.app`.
@@ -311,8 +370,8 @@ When the source is a **Windows Unity standalone** (not Godot), apply the Wine wr
   provide, and it kills the game when it can't find one. **Always force `winmm=b`** (Wine's builtin)
   so the proxy never loads. See pitfall 2026-08-30.
 - **Headless smoke test limitation:** in a display-less sandbox, `d3d11: failed to create
-  device (80004005)` is usually environmental (no surface), not fatal. Real rendering must
-  be confirmed by the user launching the `.app` on a Mac with a display.
+  device (80004005)` is usually environmental (no surface), not fatal. Confirm rendering
+  with **§10b** — do not ask the user to verify what you can verify yourself.
 
 ## 11c. Windows Godot (UNencrypted PCK) → native macOS (preferred over Wine)
 
@@ -759,11 +818,8 @@ Rules:
 - **2026-09-05 — "Can we force this game into Chinese?" → check `supported_languages` FIRST, and compare the DEMO appid against the PARENT appid.** My Fire Is Bigger Than Yours **Demo** (appid 4559990) is English-only, period. Verify with `https://store.steampowered.com/api/appdetails?appids=<appid>` → `supported_languages`: the demo declares only `"English"`, while the parent app (4428630) declares `"English, French, German, Portuguese - Brazil, Russian, Simplified Chinese, Japanese"`. **Demos are frequently cut down to English-only even when the paid game ships many languages** — never assume they match. Corroborate at build level before promising a fix: (1) `regex "Chinese"` across `*_Data/*.assets` → 0 hits; (2) the ONLY bundled font was **Lato**, and its embedded license text inside `resources.assets` says it covers "100+ Latin-based languages, 50+ Cyrillic-based languages as well as Greek and IPA phonetics" — **no CJK glyphs**, so Chinese is un-renderable regardless of locale (no `.ttf`/`.otf` shipped; fonts are baked into the assets); (3) no I2 Localization / Lean Localization / Unity.Localization package under `Managed/`; (4) no `StreamingAssets/`; (5) the game's PlayerPrefs registry key `HKCU\Software\<Company>\<Product>` held only screen-manager settings + Unity analytics — **no language preference**, i.e. language is auto-detected at launch, not stored.
   - **How Unity picks a startup language:** from `Application.systemLanguage`, which reads the **Wine locale**. Our launchers hardcode `LANG=en_US.UTF-8` / `LC_ALL=en_US.UTF-8`, which forces English even on a genuinely multi-language build. For a Chinese UI set `LANG=zh_CN.UTF-8` (optionally also `HKCU\Control Panel\International` locale) in the launcher, or expose it via the per-user `config.sh`.
   - **⛔ Never trust a naive binary scan for CJK.** Decoding Unity asset files or .NET DLLs as UTF-16 produces thousands of counterfeit "Chinese" strings — every pair of printable ASCII bytes maps into the CJK block (e.g. "This program cannot be run in DOS mode" decodes to `婍桔獩瀠潲牧浡挠湡潮敢爠湵椠佄潭敤`). Filtering by "low byte outside printable ASCII" does NOT remove them. Also beware substring false positives: a regex for `Han` matched 176 times inside identifiers like `DebugUIHandlerIndirectToggle` / `GreaterThanHandler`. Always confirm a hit by dumping surrounding printable context, and require independent evidence (store metadata + font coverage) before concluding a language exists.
-- **2026-09-05 — ⭐ When `screencapture` is unavailable, prove rendering with these three permission-free gates.** On this machine the agent process had **no Screen Recording permission**: `screencapture -x` → `could not create image from display`, `screencapture -l<WID>` → `could not create image from window`, and `osascript -e 'do shell script "screencapture …"'` failed identically. `ps`, `top -l 1` and `powermetrics` were **all denied too** (even with the tool sandbox disabled), so CPU/GPU sampling is not an option either. Do NOT conclude the port is broken; use these instead:
-  1. **DXVK state-cache growth (strongest).** `find <app> -name "*.dxvk-cache" -delete`, relaunch, wait ~60 s, then `ls -l` it. DXVK writes `My Fire Is Bigger Than Yours.dxvk-cache` **next to the game exe** (not in the prefix) and only appends an entry when it *compiles a graphics/compute pipeline*, which only happens when the game issues real draw calls. Observed: 0 → 10,754 bytes in 60 s → 10,977 bytes 40 s later. A cache that regenerates from empty and keeps growing = the render loop is running.
-  2. **Per-frame Unity log warning rate = a free FPS meter.** Count a repeating once-per-frame warning over a 10-second window: `c1=$(grep -c "render graph API" Player.log); sleep 10; c2=$(grep -c …); echo $(( (c2-c1)/10 ))`. Got **60/s** = 60 FPS. Works for any Unity game that logs the same warning per frame.
-  3. **Window geometry + longevity.** `winlist` showing a **1512x982** window (not the 280x143 `CheckMultisampleQualityLevels` error dialog) that survives several minutes.
-  Then ask the user to confirm visually. Tell them to grant **Screen Recording** to the agent app in System Settings → Privacy & Security → Screen Recording if they want automated pixel checks back.
+- **2026-09-05 — ⭐ No Screen Recording permission → probe once, then use §10b Path B. Do NOT retry.** On this machine the agent process had **no Screen Recording permission**: `screencapture -x` → `could not create image from display`, `screencapture -l<WID>` → `could not create image from window`, and `osascript -e 'do shell script "screencapture …"'` failed identically. Retrying in a different guise never works — it cost 6 tool calls before the fallback was found. Also note `ps`, `top -l 1` and `powermetrics` are **denied too** (even with the tool sandbox disabled), so CPU/GPU sampling is not an alternative. Run `tools_render/render_gate.sh` instead — it probes once and branches. Later in the same session the permission **was** granted (user approved the macOS prompt), and Path A produced real pixel evidence — so the probe must happen *per run*, never be assumed either way.
+- **2026-09-05 — `tools_render/render_gate.sh` had two real bugs found by running it, both now fixed but worth remembering:** (1) a prefix cloned from a sibling port contains that game's `Player.log`, and the naive "first match" glob picked the **wrong game's** log, silently reporting 0 FPS — always match the log's parent directory against the app name; (2) zsh **aborts on an unmatched glob** (`no matches found`), so `for f in dir/*.log` must run under `setopt NULL_GLOB` or use the `(N)` qualifier. Lesson: a verification tool that has never been executed is not a verification tool.
 - **2026-09-05 — Retail build ≠ demo build: re-run the language/assets audit on the real thing.** My Fire Is Bigger Than Yours **Demo** (appid 4559990) is English-only (only Lato, no CJK glyphs, no localization package — see previous entry). The **retail** build (appid 4428630) ships `NotoSansSC-VariableFont_wght SDF` + `Noto Sans JP` **and** `UnityEngine.LocalizationModule.dll`, i.e. Simplified Chinese works out of the box. Same title, same studio, opposite conclusion — never extrapolate a demo's capability to the full game.
 - **2026-09-05 — `SOVEREIGN` Steam emulator (offline, no Steam client needed).** Recognisable by `Game_Data/Plugins/x86_64/{SOVEREIGN64.dll, SOVEREIGN.ini, steam_api64.dll, steam_api64.svrn}` (**`.svrn` = the renamed original Valve DLL**; the `.dll` is the emulator). `SOVEREIGN.ini`:
   ```ini

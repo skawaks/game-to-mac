@@ -19,6 +19,7 @@ playbook detects other formats and routes them accordingly.
 - [Install](#install)
 - [Usage](#usage)
 - [Support matrix](#support-matrix)
+- [Render verification](#render-verification)
 - [Caveats](#caveats)
 - [License](#license)
 
@@ -236,6 +237,31 @@ Know these before you burn hours on them.
 
 ---
 
+## Render verification
+
+"It launched" is not "it renders". A black screen, a frozen frame and a bright error
+dialog all look fine in a thumbnail, so the gate has to be numeric. The skill ships the
+tooling in [`tools_render/`](tools_render/):
+
+```bash
+zsh tools_render/render_gate.sh "/Applications/Game.app" --wait 45
+```
+
+The script **probes Screen Recording permission exactly once** and then commits to one
+path — this is deliberate, because retrying `screencapture` in different guises is the
+single biggest time sink in this workflow:
+
+| | Path A — permission granted | Path B — permission denied |
+| --- | --- | --- |
+| Evidence | two captures 6 s apart | window geometry, DXVK state-cache regrowth, per-frame log warning rate |
+| Gates | `dark_fraction < 0.95`, `color_buckets > 12`, motion diff > 0.001 | cache rebuilt from 0 bytes, warning rate ≈ FPS, no `err:` in DXVK logs |
+| Verdict | PASS / FAIL | PASS / FAIL / INCONCLUSIVE (ask the user) |
+
+Requires Pillow for Path A (`python3 -m pip install pillow`); the script hunts for an
+interpreter that has it and degrades to Path B-style INCONCLUSIVE if none is found.
+
+---
+
 ## Caveats
 
 Condensed rules. `SKILL.md` §14 keeps the full dated, evidence-backed log — read it
@@ -285,15 +311,12 @@ before attempting an unfamiliar engine.
   No log after 60s means the game died before or inside engine init.
 - Launch test apps with `open -a "/Applications/X.app"`, never `nohup ... &` —
   LaunchServices detaches the process so it survives between tool calls.
-- Judge rendering numerically (`dark_fraction`, `distinct_color_buckets`), not visually.
-  A bright error dialog also scores as "rendering", so always cross-check window size
-  and log contents.
-- **If `screencapture` fails** (`could not create image from display`), the agent lacks
-  Screen Recording permission — fall back to three permission-free gates: (1) delete
-  `*.dxvk-cache`, relaunch, and confirm it regenerates and grows; (2) count a
-  once-per-frame Unity log warning over 10 s to get FPS; (3) confirm window geometry is
-  the real game size and the process survives minutes. Then ask the user to confirm
-  visually.
+- Judge rendering numerically, not visually — use
+  [`tools_render/render_gate.sh`](tools_render/render_gate.sh) (see
+  [Render verification](#render-verification)). It probes Screen Recording **once**;
+  if it is denied, do not retry `screencapture` in another guise, take Path B.
+- A bright error dialog also scores as "rendering", so always cross-check window size
+  (`280x143` = D3D failure dialog) and log contents.
 
 **Steam repack emulators**
 - `SOVEREIGN` (`SOVEREIGN64.dll` + `SOVEREIGN.ini` + `steam_api64.svrn`) is fully offline
