@@ -20,6 +20,7 @@ playbook detects other formats and routes them accordingly.
 - [Usage](#usage)
 - [Support matrix](#support-matrix)
 - [Render verification](#render-verification)
+- [Memory-leak verification & dxvk.conf](#memory-leak-verification--dxvkconf)
 - [Caveats](#caveats)
 - [License](#license)
 
@@ -259,6 +260,37 @@ single biggest time sink in this workflow:
 
 Requires Pillow for Path A (`python3 -m pip install pillow`); the script hunts for an
 interpreter that has it and degrades to Path B-style INCONCLUSIVE if none is found.
+
+## Memory-leak verification & dxvk.conf
+
+"It runs at 60 FPS" is not "it stays at 60 FPS". Unity URP games under
+DXVK + MoltenVK have a known pathology: per-frame dynamic-resource allocation
+exhausts Vulkan descriptor pools, MoltenVK never recycles the dynamically
+allocated descriptors, and `phys_footprint` grows **even while idle at the menu**
+(~56 MB/min measured) until macOS starts compressing/swapping — the classic
+"gets laggier the longer I play" report.
+
+Diagnose with `footprint` (works even when `ps`/`top` are permission-denied):
+
+```bash
+PID=$(pgrep -f "Game.exe" | head -1)
+footprint --noCategories -f formatted "$PID"   # phys_footprint — sample twice, 3-4 min apart
+footprint -f formatted "$PID"                  # per-category breakdown — attributes the growth
+```
+
+Category deltas attribute the leak: growing `IOAccelerator`/`graphics` buckets =
+DXVK↔MoltenVK churn (fixable); growing `WINE_RESERVE`/`VM_ALLOCATE` = Unity native
+heap (game side). Fix the port-layer leak with a `dxvk.conf` next to the game exe:
+
+```
+d3d11.cachedDynamicResources = "a"   # stop per-frame dynamic reallocation
+dxgi.maxFrameLatency = 1             # bounds live descriptor sets
+dxvk.numCompilerThreads = 4
+```
+
+Measured on a Unity 6 URP title: **56 MB/min → 1.4 MB/min (~40x) at menu idle**;
+graphics categories flat. Verify option support first with
+`strings system32/d3d11.dll | grep -i cachedDynamic`.
 
 ---
 
