@@ -319,7 +319,7 @@ If the source is a **Windows Godot executable** with an **encrypted `.pck`** (co
 
 - Do **not** rely on the user installing Whisky/CrossOver/Homebrew Wine; those sources break behind corporate proxies or dead CDNs. Bundle a gcenx `macOS_Wine_builds` release (e.g., `wine-stable-11.0_1-osx64.tar.xz`) inside `Contents/Resources/wine`.
 - On Apple Silicon, the bundled Wine must be x86_64 and runs under Rosetta 2. Set `DYLD_FALLBACK_LIBRARY_PATH` to `Contents/Resources/wine/lib` so `libMoltenVK.dylib` is found and Vulkan/MoltenVK initializes.
-- Create a Wine prefix under `~/Library/Application Support/<App>/prefix`.
+- **Create a per-game prefix** — see §11d for the shared-runtime layout. Every game gets its OWN prefix (never share one across games); `wineboot -u` creates it headlessly, plain `wine cmd` will not.
 
 ### Fixing CJK (hex tofu) without the PCK key
 
@@ -431,6 +431,62 @@ Smashing Bottles (SteamRIP/TENOKE, Godot 4.6.2) was ported this way end-to-end.
 - Live launch: runs and prints `Metal ... Using Device #0: Apple - Apple M1 Pro` and stays ALIVE
   (proves the renderer initialized on Apple Silicon). A harmless `rp_font is null` font-pin warning
   from `Localization.gd` is non-fatal.
+
+## 11d. Shared Wine runtime + per-game prefix (library / portable)
+
+Bundling a full gcenx Wine (~849 MB) + DXVK tarball inside **every** `.app` wastes disk
+and scatters Wine versions. Install Wine + DXVK **once** and let each game reference it.
+
+**One shared runtime, many games.** Layout under
+`~/Library/Application Support/GameToMac/`:
+
+```text
+GameToMac/
+├── runtimes/gcenx-wine-11.16/{bin,lib,share}   # cloned from any working port via cp -Rc (APFS CoW)
+├── dxvk/1.10.3/{x64,x32,dxvk.conf}             # cached tarball; DLLs get injected per-prefix
+├── prefixes/<game-id>/                          # ONE prefix per game, always
+├── templates/unity-dxvk/                        # a known-good prefix to clone instead of wineboot
+├── manifests/<game-id>.json                     # version pins (see below)
+└── dxvk-logs/<game-id>/
+```
+
+**Two modes, chosen automatically by the launcher** (no CLI flag — this skill is a
+playbook, not a CLI; the external-mode switch is just a fallback branch):
+
+- **library (default):** the launcher resolves
+  `GameToMac/runtimes/<pinned>/bin/wine` + `GameToMac/prefixes/<id>`. Saves ~870 MB per
+  game and centralises Wine upgrades.
+- **portable (fallback):** if `GameToMac` is absent — the `.app` was copied to a Mac that
+  doesn't have it — the launcher falls back to `Contents/Resources/{wine,prefix,dxvk}`
+  inside the bundle, so the `.app` still runs standalone. To *produce* a portable copy,
+  copy `GameToMac/runtimes/<ver>/wine` back into `Contents/Resources/wine` before shipping.
+
+**Version pinning.** Every port records `wine_runtime` + `dxvk_version` + `engine` +
+`renderer` in `manifests/<game-id>.json` and as the `WINE_RUNTIME` / `DXVK_VER` pins at
+the top of its launcher (see `tools_render/launcher_wine.sh`). **Never auto-migrate an old
+game to a newer Wine** — only after verifying it still renders.
+
+**Prefix isolation is sacred.** Each game owns `GameToMac/prefixes/<id>` — its own
+registry, injected DLLs, fonts, VC runtime, logs, and shader cache. Clone from
+`templates/unity-dxvk` (APFS `cp -Rc`) instead of `wineboot` from scratch; after cloning,
+delete the donor's `AppData/LocalLow/<other game>/` and `*.lock` files. Do NOT share a
+mutable prefix between games.
+
+**DXVK is injected per-prefix, not read from a shared folder.** The launcher copies
+`dxvk/<ver>/x64/{d3d11,d3d10core}.dll` into each prefix's `system32` on first run
+(idempotent). `GameToMac/dxvk/<ver>/` is just the cached source tarball; the active
+backend DLLs live in the prefix, not in a shared dir.
+
+**Launcher template:** `tools_render/launcher_wine.sh`. Copy it to
+`Contents/MacOS/<launcher>`, edit ONLY the PER-GAME PINS block, and set
+`CFBundleExecutable` to match. It prints `[game-to-mac] mode=...` to `wine.log` for
+diagnostics (helps a future "doctor" step tell library vs portable apart).
+
+**Signing caveat (unchanged):** never ad-hoc codesign Wine bundles (pitfall 2026-08-29) —
+external runtime writes + the unsigned `libMoltenVK.dylib` both break the seal. Use
+`xattr -dr com.apple.quarantine` + Open Anyway. Referencing the external shared runtime by
+**absolute path (not symlinks)** keeps Gatekeeper happy and makes Wine upgrades/removals
+clean.
 
 ## 12. Deliver
 
@@ -865,3 +921,5 @@ Rules:
 - **2026-09-06 — `nohup <extract|wine> ... &` from a Bash tool call is killed when the call returns; `run_in_background: true` is not.** A `nohup bsdtar` extraction died at 1.6 GB / 160 files with an empty log and no error. Long-running extraction **and** long-running Wine must go through the tool's own background mechanism.
 - **2026-09-06 — A `:` in the `.app` name breaks LaunchServices.** `Heroes of Might and Magic: Olden Era.app` → `open` fails with *"The application cannot be opened because its executable is missing"* even though `CFBundleExecutable` matches the file on disk, because `:` is the legacy HFS path separator and LaunchServices rewrites it to `/`. Use `-` (`Heroes of Might and Magic - Olden Era.app`) for both the bundle and the `Contents/MacOS/` launcher.
 - **2026-09-06 — zsh unmatched-glob abort, launcher edition.** Same class as the 2026-09-05 `render_gate.sh` bug: the launcher's "truncate `Player.log` on launch" loop (`for D in "$PREFIX"/drive_c/users/*/AppData/LocalLow/<Company>/<Product>/`) aborts the whole script with `no matches found` on the very first run, before Wine ever starts — and because the launcher `exec`s Wine at the end, the only symptom is "nothing happens, no `wine.log`". Put `setopt NULL_GLOB` at the top of every zsh launcher.
+
+- **2026-09-06 — ⭐ Shared Wine runtime + external prefix (the `GameToMac` layout) replaces per-`.app` bundling.** A port no longer carries its own ~849 MB `wine/` + ~20 MB `dxvk/`; instead `~/Library/Application Support/GameToMac/{runtimes,dxvk,prefixes,templates,manifests}` is the single source of truth and the launcher resolves it by absolute path (**library mode**) with an automatic `Contents/Resources/{wine,prefix}` fallback (**portable mode**). Verified on Heroes of Might and Magic: Olden Era — moved its prefix out of the `.app` into `prefixes/heroes-olden-era/`, deleted the in-bundle `wine/`+`dxvk/` (reclaimed ~900 MB: 7.6 GB → 6.7 GB), and it still boots to the menu with `mode=library` in `wine.log` and a `RENDERING`/`ANIMATING` pixel gate. Prefix externalization also means saves survive `.app` deletion. Rules folded into §11d: prefix isolation is sacred (clone from `templates/unity-dxvk`, never share a mutable prefix); DXVK is **injected per-prefix into `system32`** — the `dxvk/` dir is only a cached tarball, never loaded at runtime; version pins live in `manifests/<id>.json` + the launcher's `WINE_RUNTIME`/`DXVK_VER`; no central `games.json`/"doctor" — one Mac with a handful of games only needs a per-game `config.sh` + manifest. The unified launcher template is `tools_render/launcher_wine.sh`.

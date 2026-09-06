@@ -85,15 +85,47 @@ flowchart TD
 
 1. **Check Steam/GOG for a native macOS build first.** Many "Windows-only" indie games
    have one. This beats every workaround below.
-2. **Bundle a gcenx Wine build** inside `Contents/Resources/wine`. Do not depend on the
+2. **Install a shared gcenx Wine runtime** under
+   `~/Library/Application Support/GameToMac/runtimes/gcenx-wine-<ver>` (clone from a
+   working port with `cp -Rc`, or extract a `wine-staging-*.tar.xz`). Do not depend on the
    user installing Whisky / CrossOver / Homebrew Wine — those sources break behind
-   proxies and dead CDNs.
+   proxies and dead CDNs. The launcher (`tools_render/launcher_wine.sh`) resolves it
+   automatically and falls back to an in-bundle `wine/` for portable copies. See
+   [Shared runtime](#shared-wine-runtime-library--portable).
 3. **Create a prefix** with `wineboot -u` (plain `wine cmd` will not create `drive_c`).
 4. **Install the right graphics backend.** This is where nearly all the effort goes, and
    the correct choice depends on the engine — see the [support matrix](#support-matrix).
 5. **Handle the repack layer.** GoldBerg / TENOKE are offline and fine. OnlineFix will
    silently kill the game unless you force Wine's builtin `winmm` and supply an offline
    Steam API emulator.
+
+### Shared Wine runtime (library / portable)
+
+The playbook installs Wine + DXVK **once** under `~/Library/Application Support/GameToMac/`
+and lets every game reference it, instead of bundling ~870 MB of Wine inside each `.app`.
+
+```text
+GameToMac/
+├── runtimes/gcenx-wine-11.16/{bin,lib,share}   # one Wine, shared by all games
+├── dxvk/1.10.3/{x64,x32,dxvk.conf}             # cached tarball; injected per-prefix
+├── prefixes/<game-id>/                          # one isolated prefix per game
+├── templates/unity-dxvk/                        # known-good prefix to clone
+├── manifests/<game-id>.json                     # wine/dxvk version pins
+└── dxvk-logs/<game-id>/
+```
+
+- **Library mode (default):** the launcher uses the shared runtime + the game's external
+  prefix. Saves ~870 MB per game and centralises Wine upgrades.
+- **Portable mode (fallback):** if `GameToMac` is missing — the `.app` was copied to
+  another Mac — the launcher falls back to `Contents/Resources/{wine,prefix}` inside the
+  bundle, so the `.app` still runs standalone. To ship a portable copy, copy the shared
+  `runtimes/<ver>/wine` back into `Contents/Resources/wine` first.
+
+Each game keeps its **own prefix** (registry, DLLs, fonts, logs, shader cache) — prefixes
+are never shared. DXVK's `d3d11.dll`/`d3d10core.dll` are injected into each prefix's
+`system32` on first launch; the `dxvk/` folder is just the cached source. Version pins
+(`wine_runtime`, `dxvk_version`, `engine`, `renderer`) live in `manifests/<id>.json` and at
+the top of the launcher. Full detail in `SKILL.md` §11d.
 
 ### Why the testing step is non-negotiable
 
@@ -124,9 +156,9 @@ the tested reference.
 | Need | Notes |
 | --- | --- |
 | Rosetta 2 | Apple Silicon runs the x86_64 Wine build under translation. |
-| gcenx Wine build | ~849 MB per bundle. Reuse an existing one with `cp -Rc` (APFS clone, instant, copy-on-write). |
+| gcenx Wine build | Installed **once** at `~/Library/Application Support/GameToMac/runtimes/gcenx-wine-<ver>` (clone from any working port with `cp -Rc`). Not per-bundle — see [Wine route](#route-b--wine-wrapper-when-there-is-no-macos-engine) and [Shared runtime](#shared-wine-runtime-library--portable). |
 | MoltenVK | Ships with the gcenx build. This is the only Vulkan path — there is no vkd3d. |
-| Disk space | Budget ~1 GB per ported game. |
+| Disk space | Budget ~7 GB per game for the assets; the Wine runtime (~870 MB) and DXVK are **shared**, not duplicated per game. |
 
 ### Network
 
