@@ -215,6 +215,7 @@ packaging, signing, verification.
 | Unity Mono (no `GameAssembly.dll`, no `steam_api*.dll`) | Wine + DXVK-macOS 1.10.3, `-force-d3d11`, `MVK_CONFIG_LOG_LEVEL=error` | My Fire Is Bigger Than Yours — DEMO (Punch Pancake, M1 Pro) | ✅ Cleanest port: no GoldBerg (no Steam DRM), D3D12 auto-falls-back to D3D11, Mono runtime works under Wine |
 | Unity 6 (6000.3.x) Mono + **SOVEREIGN** repack, retail build | Wine + DXVK-macOS 1.10.3, `-force-d3d11`; reuse `wine/`+`dxvk/`+`prefix/` from a sibling port via `cp -Rc` | My Fire Is Bigger Than Yours (6000.3.7f1, appid 4428630, M1 Pro) | ✅ 60 FPS, D3D 11.0 [level 11.0] on Apple M1 Pro. SOVEREIGN is offline — no Steam client, no GoldBerg surgery. Retail ships NotoSansSC + Unity.Localization, so Simplified Chinese works (demo does not) |
 | Unity 2022.3 Mono | Wine + DYLD OpenGL shim | Demon Lord: Just a Block | ✅ wined3d reports D3D 11.0 level 10.1 |
+| Unity 6 (6000.0.x) IL2CPP, **Microsoft Store / MSIX (GDK)** build | Wine + DXVK-macOS 1.10.3, `-force-d3d11`, `winmm=b`; **startup `.mp4`s moved out of `StreamingAssets/video/`** | Heroes of Might and Magic: Olden Era (6000.0.66f1, M1 Pro) | ✅ D3D 11.0 [level 11.0] on Apple M1 Pro, reaches the main menu and renders. `XGameRuntime`/"Platform Store is not running" errors are non-fatal. Cost: **no in-game cinematics** (see [caveats](#caveats)) |
 
 ### Partially working
 
@@ -350,6 +351,13 @@ before attempting an unfamiliar engine.
 - A bright error dialog also scores as "rendering", so always cross-check window size
   (`280x143` = D3D failure dialog) and log contents.
 
+**Video / Media Foundation**
+- Wine cannot decode video: `winedmo.so` wants x86_64 FFmpeg 7 dylibs that no gcenx
+  bundle ships. A Unity logo/cinematic video therefore **hangs the game on a black
+  screen** that is indistinguishable from a broken renderer. Move the `.mp4` files out
+  of `<Game>_Data/StreamingAssets/video/` — Unity logs "video ... dont found" and
+  carries on. Trade-off: no cinematics.
+
 **Steam repack emulators**
 - `SOVEREIGN` (`SOVEREIGN64.dll` + `SOVEREIGN.ini` + `steam_api64.svrn`) is fully offline
   and needs no extra work. Switch UI language by editing `Language=` in `SOVEREIGN.ini`
@@ -359,7 +367,12 @@ before attempting an unfamiliar engine.
 
 **Misc**
 - Wine prefix init needs `wineboot -u`; `wine cmd` will not create `drive_c`.
-- Use `bsdtar` for RAR — there is no `unrar`.
+- Use `bsdtar` for RAR — there is no `unrar`. **Do not use `7z`/p7zip 17.05**: it lists
+  RAR5 archives fine but `7z x` reports `Unsupported Method` and writes 0-byte files.
+- Background extraction/wine must run through the tool's own background mechanism;
+  `nohup ... &` is killed as soon as the tool call returns.
+- Never put a `:` in the `.app` or launcher name — LaunchServices treats it as a path
+  separator and `open` reports "its executable is missing". Use `-`.
 - `iconutil` chokes on some PNGs. Generate `.icns` with Pillow instead.
 - Reuse a Wine bundle via `cp -Rc` (APFS clone) — instant, and the copy is independent.
 - Set `LANG`/`LC_ALL` and add Wine font replacements for CJK in **Godot** Windows builds.
