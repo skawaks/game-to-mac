@@ -57,7 +57,7 @@ fi
 # A Wine-wrapped .app built to this playbook keeps its prefix INSIDE the bundle
 # ($RES/prefix). Older ports put it under ~/Library/Application Support.
 PREFIX_DIR=""
-for cand in "$RES/prefix" "$HOME/Library/Application Support"/*/prefix; do
+for cand in "$RES/prefix" "$HOME/Library/Application Support"/*/prefix "$HOME/Library/Application Support/GameToMac/prefixes"/*; do
   [ -d "$cand" ] && PREFIX_DIR="$cand" && break
 done
 
