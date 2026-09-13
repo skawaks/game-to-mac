@@ -55,35 +55,25 @@ fi
 
 # ------------------------------------------------------- locate the log -----
 # A Wine-wrapped .app built to this playbook keeps its prefix INSIDE the bundle
-# ($RES/prefix). Older ports put it under ~/Library/Application Support.
-PREFIX_DIR=""
-for cand in "$RES/prefix" "$HOME/Library/Application Support"/*/prefix "$HOME/Library/Application Support/GameToMac/prefixes"/*; do
-  [ -d "$cand" ] && PREFIX_DIR="$cand" && break
-done
-
+# ($RES/prefix). Library-mode ports keep it in GameToMac/prefixes/<game-id>.
+# Older ports put it under ~/Library/Application Support/<name>/prefix.
+# Scan ALL candidate prefixes and pick the Player.log whose parent dir matches
+# the app name — never just take the first prefix that exists (a machine with
+# several ports will have stale prefixes from siblings, and the wrong pick
+# silently reports 0 FPS).
 PLAYER_LOG=""
-if [ -n "$PREFIX_DIR" ]; then
-  # Prefer the log whose parent directory matches the app name. A prefix cloned
-  # from a sibling port carries that game's leftovers (e.g. <Other Studio>/
-  # <Other Game>/Player.log), and the wrong pick silently reports 0 FPS.
+for PREFIX_DIR in "$RES/prefix" \
+                  "$HOME/Library/Application Support/GameToMac/prefixes"/* \
+                  "$HOME/Library/Application Support"/*/prefix; do
+  [ -d "$PREFIX_DIR" ] || continue
   for cand in "$PREFIX_DIR"/drive_c/users/*/AppData/LocalLow/*/*/Player.log; do
     [ -f "$cand" ] || continue
     if [ "$(basename "$(dirname "$cand")")" = "$NAME" ]; then
       PLAYER_LOG="$cand"
-      break
+      break 2
     fi
   done
-  # Fallback: newest log in the prefix.
-  if [ -z "$PLAYER_LOG" ]; then
-    PLAYER_LOG="$(ls -t "$PREFIX_DIR"/drive_c/users/*/AppData/LocalLow/*/*/Player.log 2>/dev/null | head -1)"
-  fi
-  if [ -n "$PLAYER_LOG" ] && [ -n "$WINLIST" ]; then
-    AGE=$(( $(date +%s) - $(stat -f%m "$PLAYER_LOG") ))
-    if (( AGE > 600 )); then
-      echo "!! WARNING: selected Player.log is ${AGE}s old — it may belong to another port"
-    fi
-  fi
-fi
+done
 
 # ---------------------------------------------------------- launch (cold) ---
 # Cold start matters: clearing the DXVK cache only proves something if we then
