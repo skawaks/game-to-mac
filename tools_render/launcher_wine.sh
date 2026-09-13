@@ -125,6 +125,14 @@ cd "$RES/game"
 export RENDERER="${RENDERER:-$FORCE_RENDERER}"
 export EXTRA_FLAGS="${EXTRA_FLAGS-}"
 
+# Re-sign the bundle ad-hoc. GoldBerg / wineprefix writes files inside the
+# bundle at runtime, which invalidates the signature; without a (re-)signature
+# macOS Gatekeeper may refuse subsequent launches with a "damaged" or
+# "developer cannot be verified" dialog. Ad-hoc signing is local, free, and
+# silent; ignore failures (e.g. read-only bundle, locked prefix) and keep going.
+BUNDLE="$(cd "$RES/.." && pwd)"
+codesign --force --sign - "$BUNDLE" 2>/dev/null || true
+
 WINELOG="${WINELOG:-$RES/wine.log}"
 echo "[game-to-mac] mode=$MODE runtime=$RUNTIME prefix=$PREFIX" >> "$WINELOG"
 exec "$WINE" "$EXE" $RENDERER $EXTRA_FLAGS "$@" >> "$WINELOG" 2>&1
