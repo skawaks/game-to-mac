@@ -196,17 +196,36 @@ Make executable: `chmod +x "Contents/MacOS/Dirt Clicker Demo"`.
 
 ### Icon
 
-Use `icon.png` from the game. Generate `.icns`:
+**Check first: most repacks ship no icon at all.** If `Contents/Resources/` has no
+`.icns` (or `CFBundleIconFile` points at a file that does not exist), Finder and the
+Dock show the blank default icon — always worth fixing, it is the most visible thing
+about the port. Grab a square PNG from the game's assets, or generate one, then:
 
 ```bash
-mkdir icon.iconset
-for s in 16 32 128 256 512; do
-    sips -z $s $s icon.png --out "icon.iconset/icon_${s}x${s}.png"
-    sips -z $((s*2)) $((s*2)) icon.png --out "icon.iconset/icon_${s}x${s}@2x.png"
-done
-iconutil -c icns icon.iconset -o Icon.icns
-rm -rf icon.iconset
+SKILL=/Users/leofu/.workbuddy/skills/game-to-mac
+PY=/Users/leofu/.workbuddy/binaries/python/envs/default/bin/python
+"$PY" "$SKILL/tools_icon/make_icns.py" --input icon.png --output Icon.icns \
+      [--erase X0,Y0,X1,Y1 ...] [--keep-master master.png]
 ```
+
+`tools_icon/make_icns.py` (Pillow + numpy; `pip install pillow numpy`) does what a
+plain `sips`/`iconutil` loop does **not**:
+
+| Step | Why it matters |
+|---|---|
+| `--erase x0,y0,x1,y1` | Reconstructs a blemish / "AI generated" watermark by blending the clean strips above and left of the rect (2-edge Coons). Repeatable. |
+| background removal | Flood-fills the flat background connected to the **four canvas corners**, then harmonically extends the artwork into it (Jacobi, ~260 iters). Output: transparent corners with **no white fringe** — the RGB under the alpha edge is real artwork colour, not white. |
+| native curvature | Masks with the Apple radius (0.225 × content) so the icon does not read as a squarish tile next to real apps. |
+| Big Sur grid | 824×824 content centred on a 1024×1024 transparent canvas. |
+| `.icns` | Renders all 10 `.iconset` bitmaps and runs `iconutil`. |
+
+Then `cp Icon.icns "<App>.app/Contents/Resources/Icon.icns"`, make sure Info.plist has
+`CFBundleIconFile` = `Icon`, `touch` the app, `lsregister -f` it and `killall Dock`.
+`qlmanage -t` **hangs in the agent sandbox** — do not use it to verify; `sips -g` on the
+extracted iconset reps is the permission-free check.
+
+If the source PNG has no drawn rounded square (e.g. a transparent cut-out object), run
+with `--no-native-radius --no-grid` to keep its own silhouette.
 
 ## 9. Install to `/Applications`
 
@@ -942,3 +961,4 @@ Rules:
 - **2026-09-13 — ⭐ First UE5 (Unreal Engine 5.1.0) Windows port on Apple Silicon: `-dx11` + DXVK works out of the gate.** Scratch the Ticket (appid 4626940, STEAMUNLOCKED repack, GoldBerg emu) — no native rebuild exists, but the Wine path needed NO new tricks: gcenx `wine-staging-11.16` + DXVK-macOS async 1.10.3, launch `LotteryTicket-Win64-Shipping.exe -dx11`. UE5.1 ships the D3D12 Agility SDK (`Binaries/Win64/D3D12/D3D12Core.dll`), but D3D12 is dead under Wine (no vkd3d) — the `-dx11` flag selects the D3D11 RHI and DXVK takes it (`dark_fraction 0.031 / 2057 color buckets / motion 0.31 => PASS` on first try, M1 Pro). Detection: UE layout = `Engine/Binaries/ThirdParty/*` + `LotteryTicket/Content/Paks/*.{pak,ucas,utoc}` (IoStore) + `*-Win64-Shipping.exe`; version from `strings <exe> | grep 'cpp 5\.'` (prints `cpp 5.1.0`). GoldBerg emu placed by the repack at `Engine/Binaries/ThirdParty/Steamworks/Steamv161/Win64/steam_api64.dll` with `steam_settings/` NEXT TO it — UE loads it from there directly, no GoldBerg surgery needed (same rules as Unity: `winmm=b`, no codesign, language in `configs.user.ini`). Strip `.pdb` files (UE repacks carry 300MB+ PDBs) and the non-shipping `<Game>.exe` (only `<Game>-Win64-Shipping.exe` is needed) — cut this bundle 1.5GB→681MB. UE logs to `<Game>/Saved/Logs/` inside the game dir (NOT Unity `Player.log`), so render_gate's "Player.log N seconds old" warning is noise for UE ports — ignore it. CWD must be the game ROOT (`Engine/` + `<Project>/` siblings) so the pak mount and the Steam emu both resolve.
 - **2026-09-13 — The agent sandbox DROPS the empty-string arg of BSD `sed -i ''`**, turning `sed -i '' 's/a/b/' file` into a broken invocation (`sed: s/a/b/: No such file or directory`). Use `perl -pi -e 's/a/b/' file` instead — identical semantics, no empty arg. Also re-confirmed: a zsh glob failure (`no matches found`) on one command aborts the REST OF THE LINE, so later `&&`/`;` commands silently never run — always `setopt NULL_GLOB` and use `(N)` qualifiers in agent one-liners (third time this bit us).
 - **2026-09-13 (b) — render_gate false negatives on UE5 ports, do not trust FAIL without checking the process:** (1) the UE window title is the UE PROJECT NAME (e.g. `LotteryTicket`), not the .app display name — the gate's title search fails and prints "game likely died during init" while the process is alive with a full 1512x982 window; cross-check with `pgrep -f <Game>-Win64-Shipping.exe` and `winlist` (owner app name matches the .app, title does not). (2) Screen Recording permission can flip GRANTED→DENIED between runs in the same session — probe per run (existing rule) and fall back to Path B; winlist itself never needs it. (3) winlist may not list the game window while it is on another Space — re-run before concluding "no window". (4) A DXVK state cache next to the exe (e.g. `<Game>-Win64-Shipping.dxvk-cache`) is written on first real draw calls even when pixel capture is unavailable — its mere presence + process longevity is decent render evidence; it only grows during pipeline compilation, so it plateaus at menu idle.
+- **2026-09-13 (c) — App icons: "no icon at all" is the common case, and an AI-generated PNG needs three fixes before it is a macOS icon.** Scratch the Ticket shipped `CFBundleIconFile = Icon` pointing at a file that did not exist -> blank default icon in Finder/Dock. Generating a 1024 PNG and running the naive `sips` loop is not enough: (1) AI images come back as a rounded square **on a flat white canvas**, so the corners must become transparent — but a global `min>threshold -> alpha=0` punches holes in *interior* white art (white stars, specular highlights, the light ring of a coin). Flood-fill only the background connected to the four canvas corners instead, then **extend the artwork into it** (harmonic/Jacobi fill) so the RGB under the new alpha edge is artwork colour — otherwise you ship a white light-fringe around the whole icon that is clearly visible at 256/512. (2) The drawn corner radius (~0.13 of the canvas) is much squarer than Apple's 0.225, so mask it. (3) Lay the art out on the Big Sur grid (824 content on a 1024 canvas) or the icon looks oversized next to native apps. Also: the generator's bottom-right watermark is a *semi-transparent light* overlay (~RGB 150 over dark art), so it is invisible to any "find grey pixels" detector that also matches sparkle highlights — locate it by comparing raw min-channel values against the surrounding flat gradient, and confirm visually with a contrast-stretched crop. Tool: `tools_icon/make_icns.py` (`--erase` for the watermark). Verify with `iconutil -c iconset` + `sips -g` on the 1024 rep; `qlmanage -t` hangs in the agent sandbox.
